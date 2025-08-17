@@ -1,0 +1,8 @@
+python-telegram-bot==21.6
+python-dotenv==1.0.1
+aiohttp==3.9.5
+Jinja2==3.1.4
+python-docx==1.1.2
+docxtpl==0.17.0
+# For PDF conversion (optional)
+# libreoffice must be installed via apt.txt on Render
