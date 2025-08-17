@@ -2,4 +2,4 @@
 set -e
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-# لا ننشئ /var/data في الـBuild أبداً
+# Don't create /var/data at build time; Render build FS is read-only.
