@@ -708,11 +708,19 @@ async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ============ AIOHTTP mini server (/health) ============
 async def create_app_and_site(app_tg: Application):
+    async def root(request):
+        return web.Response(text="OK")
+
     async def health(request):
         return web.json_response({"ok": True, "service": "cvbot", "time": datetime.utcnow().isoformat()})
 
     app = web.Application()
-    app.add_routes([web.get("/health", health)])
+    app.add_routes([
+        web.get("/", root),
+        web.get("/health", health),
+        web.head("/", root),
+        web.head("/health", health),
+    ])
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
@@ -784,3 +792,33 @@ if __name__ == "__main__":
     except (KeyboardInterrupt, SystemExit):
         log.info("Shutting down…")
 
+
+# ================== requirements.txt ==================
+# Save the following lines into a file named: requirements.txt
+"""
+python-telegram-bot==21.6
+python-dotenv==1.0.1
+aiohttp==3.9.5
+Jinja2==3.1.4
+python-docx==1.1.2
+docxtpl==0.17.0
+# For PDF conversion (optional)
+# libreoffice must be installed via apt.txt on Render
+"""
+
+# ================== apt.txt (optional for PDF) ==================
+# Save as apt.txt if you want ENABLE_PDF=1
+"""
+libreoffice
+fonts-dejavu-core
+"""
+
+# ================== render-build.sh (optional) ==================
+# Make executable (chmod +x render-build.sh) and set as Build Command
+"""
+#!/usr/bin/env bash
+set -e
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+mkdir -p /var/data/exports
+"""
