@@ -2,4 +2,4 @@
 set -e
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-mkdir -p /var/data/exports
+# لا ننشئ /var/data في الـBuild أبداً
