@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-CV Telegram Bot — Render‑Ready
+CV Telegram Bot — Render-Ready
 ==============================
 
 • Stack: python-telegram-bot v21.x (async), SQLite, docxtpl + (fallback) python-docx, aiohttp mini server (/health), optional PDF export via LibreOffice if available.
@@ -26,7 +26,7 @@ assets/templates/ATS_en.docx   (اختياري)
 assets/templates/Modern_ar.docx (اختياري)
 assets/templates/Modern_en.docx (اختياري)
 
-If a template .docx is missing, bot will auto‑generate a simple DOCX using python-docx.
+If a template .docx is missing, bot will auto-generate a simple DOCX using python-docx.
 
 Run locally:
 ------------
@@ -739,12 +739,18 @@ async def create_app_and_site(app_tg: Application):
 
 
 # ============ Main ============
-async def main():
+async def _post_init(app: Application):
+    # Runs inside PTB's own event loop before polling starts
+    await set_my_commands(app)
+    await create_app_and_site(app)
+
+
+def main():
     token = os.getenv("BOT_TOKEN", "")
     if not token:
         raise RuntimeError("BOT_TOKEN is missing")
 
-    application = Application.builder().token(token).build()
+    application = Application.builder().token(token).post_init(_post_init).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -787,50 +793,11 @@ async def main():
 
     application.add_handler(cv_conv)
 
-    # Background: aiohttp server
-    await create_app_and_site(application)
-
-    await set_my_commands(application)
-
     log.info("Bot starting…")
-    await application.run_polling(close_loop=False)
+    # IMPORTANT: Don't run inside asyncio.run / don't await here to avoid nested loop error
+    application.run_polling()
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Shutting down…")
-
-
-# ================== requirements.txt ==================
-# Save the following lines into a file named: requirements.txt
-"""
-python-telegram-bot==21.6
-python-dotenv==1.0.1
-aiohttp==3.9.5
-Jinja2==3.1.4
-python-docx==1.1.2
-docxtpl==0.17.0
-# For PDF conversion (optional)
-# libreoffice must be installed via apt.txt on Render
-"""
-
-# ================== apt.txt (optional for PDF) ==================
-# Save as apt.txt if you want ENABLE_PDF=1
-"""
-libreoffice
-fonts-dejavu-core
-"""
-
-# ================== render-build.sh (optional) ==================
-# Make executable (chmod +x render-build.sh) and set as Build Command
-"""
-#!/usr/bin/env bash
-set -e
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-# NOTE: Don't create /var/data here. Render build filesystem is read-only.
-# The app will create /var/data/exports at runtime when the persistent disk is mounted.
-"""
+    main()
 
