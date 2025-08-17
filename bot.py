@@ -77,8 +77,13 @@ PAYLINK_UPGRADE_URL = os.getenv("PAYLINK_UPGRADE_URL", "")
 ENABLE_PDF = os.getenv("ENABLE_PDF", "0") == "1"
 PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "10000")))
 TEMPLATES_DIR = Path("assets/templates")
-EXPORTS_DIR = Path("/var/data/exports")
-EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "/var/data/exports"))
+try:
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    # Fallback to local writable dir if /var/data is not available during runtime
+    EXPORTS_DIR = Path("./exports")
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============ Conversation States ============
 (
@@ -114,7 +119,12 @@ TEMPLATES_INDEX = {
 class DB:
     def __init__(self, path: str):
         self.path = path
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            # Fallback if /var/data is not writable at runtime
+            self.path = str(Path("./var_data/bot.db"))
+            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
     def _conn(self):
@@ -820,5 +830,7 @@ fonts-dejavu-core
 set -e
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-mkdir -p /var/data/exports
+# NOTE: Don't create /var/data here. Render build filesystem is read-only.
+# The app will create /var/data/exports at runtime when the persistent disk is mounted.
 """
+
