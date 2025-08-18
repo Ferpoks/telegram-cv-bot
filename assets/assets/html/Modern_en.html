@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{ full_name }} — {{ title }}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root{--accent:#0f172a;--muted:#64748b}
+    *{box-sizing:border-box}
+    html,body{margin:0;padding:0;background:#fff;color:#0b0b0b;font-family:Inter,system-ui;line-height:1.45}
+    @page{ size:A4;margin:16mm 14mm 16mm 14mm }
+    .head{border:2px solid var(--accent);border-radius:14px;padding:14px 16px;margin-bottom:12px}
+    .name{font-size:30px;font-weight:800;color:var(--accent);margin:0}
+    .role{color:var(--muted);margin:2px 0 0}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .card{border:1px solid #e5e7eb;border-radius:12px;padding:12px}
+    .h{font-weight:700;font-size:13px;margin:0 0 8px}
+    .line{margin:3px 0}
+    .section{margin:12px 0}
+    .job{margin:0 0 10px}
+    .row{display:flex;justify-content:space-between;gap:12px}
+    .role2{font-weight:700}
+    .dates{white-space:nowrap;color:#6b7280}
+    .company{color:#6b7280}
+    .bullets{margin:6px 0 0 16px;padding:0}
+    .bullets li{margin:4px 0}
+  </style>
+</head>
+<body>
+  <header class="head">
+    <h1 class="name">{{ full_name }}</h1>
+    {% if title %}<div class="role">{{ title }}</div>{% endif %}
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <div class="h">Contact</div>
+      {% if phone %}<div class="line">{{ phone }}</div>{% endif %}
+      {% if email %}<div class="line">{{ email }}</div>{% endif %}
+      {% if city  %}<div class="line">{{ city }}</div>{% endif %}
+      {% if links %}<div class="line">{{ links }}</div>{% endif %}
+    </section>
+
+    <section class="card">
+      <div class="h">Skills</div>
+      {% if skills_list %}
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          {% for s in skills_list %}<span style="background:#f1f5f9;border:1px solid #e5e7eb;padding:6px 8px;border-radius:8px;font-size:12px">{{ s }}</span>{% endfor %}
+        </div>
+      {% elif skills %}<div class="line">{{ skills }}</div>{% endif %}
+    </section>
+  </div>
+
+  {% if summary %}
+  <section class="section">
+    <div class="h">Profile</div>
+    <div>{{ summary }}</div>
+  </section>
+  {% endif %}
+
+  {% if experiences %}
+  <section class="section">
+    <div class="h">Professional Experience</div>
+    {% for e in experiences %}
+      <div class="job">
+        <div class="row">
+          <div class="role2">{{ e.role }}</div>
+          <div class="dates">{% if e.start_date %}{{ e.start_date }}{% endif %}{% if e.end_date %} – {{ e.end_date }}{% endif %}</div>
+        </div>
+        <div class="company">{{ e.company }}</div>
+        {% if e.bullets %}
+        <ul class="bullets">
+          {% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}
+        </ul>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% if education %}
+  <section class="section">
+    <div class="h">Education</div>
+    {% for e in education %}
+      <div class="line"><b>{{ e.degree }}</b> — {{ e.school }}{% if e.year %} · {{ e.year }}{% endif %}</div>
+    {% endfor %}
+  </section>
+  {% endif %}
+</body>
+</html>
