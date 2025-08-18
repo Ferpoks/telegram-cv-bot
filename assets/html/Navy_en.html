@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ full_name }} - {{ title }}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap" rel="stylesheet">
+<style>
+  :root{--navy:#1f3a5f; --text:#1f2937; --muted:#6b7280; --bg:#ffffff; --accent:#0ea5b6; --line:#e5e7eb;}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 "Inter",system-ui,Arial}
+  .page{width:210mm;min-height:297mm;margin:0 auto}
+  .grid{display:grid;grid-template-columns:72mm 1fr}
+  .sidebar{background:var(--navy);color:#fff;padding:18mm 12mm;min-height:297mm}
+  .photo{width:46mm;height:46mm;border-radius:50%;object-fit:cover;border:3px solid rgba(255,255,255,.25);margin:0 0 10mm}
+  .s-head{font-weight:800;letter-spacing:.2px;margin:8mm 0 3mm;font-size:11.5pt}
+  .s-item{margin:2.2mm 0;color:#e5e7eb;font-size:10.3pt}
+  .content{padding:18mm 18mm}
+  .name{font-size:22pt;font-weight:800;letter-spacing:.3px;color:var(--navy);margin:0}
+  .role{margin:2mm 0 10mm;color:var(--muted);font-size:12pt}
+  h2{font-size:12.5pt;margin:10mm 0 3mm;color:var(--navy)}
+  .sep{height:1px;background:var(--line);margin:4mm 0 6mm}
+  .item{margin:4mm 0 6mm}
+  .job{font-weight:700}
+  .meta{color:var(--muted);font-size:10pt;margin-left:2mm}
+  ul{list-style:none;margin:2mm 0 0;padding:0}
+  li{margin:1.4mm 0;position:relative;padding-left:4.2mm}
+  li:before{content:"•";position:absolute;left:0;color:var(--accent)}
+  @page{size:A4;margin:0}
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="grid">
+      <aside class="sidebar">
+        {% if photo_data_uri %}<img class="photo" src="{{ photo_data_uri }}" alt="photo">{% endif %}
+        <div class="s-head">About</div>
+        <div class="s-item">{{ summary }}</div>
+
+        <div class="s-head">Contact</div>
+        {% if phone %}<div class="s-item">📞 {{ phone }}</div>{% endif %}
+        {% if email %}<div class="s-item">✉️ {{ email }}</div>{% endif %}
+        {% if city %}<div class="s-item">📍 {{ city }}</div>{% endif %}
+        {% if links %}<div class="s-item">🔗 {{ links }}</div>{% endif %}
+
+        {% if skills_list %}
+        <div class="s-head">Skills</div>
+        {% for s in skills_list %}<div class="s-item">• {{ s }}</div>{% endfor %}
+        {% endif %}
+
+        {% if education %}
+        <div class="s-head">Education</div>
+        {% for ed in education %}
+          <div class="s-item">{{ ed.degree }} — {{ ed.school }}{% if ed.year %} ({{ ed.year }}){% endif %}</div>
+        {% endfor %}
+        {% endif %}
+      </aside>
+
+      <main class="content">
+        <h1 class="name">{{ full_name }}</h1>
+        <div class="role">{{ title }}</div>
+
+        <h2>Professional Experience</h2>
+        <div class="sep"></div>
+        {% for e in experiences %}
+          <div class="item">
+            <div class="job">{{ e.role }} — {{ e.company }}
+              {% if e.start_date or e.end_date %}<span class="meta">({{ e.start_date }} - {{ e.end_date }})</span>{% endif %}
+            </div>
+            {% if e.bullets %}
+              <ul>
+                {% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}
+              </ul>
+            {% endif %}
+          </div>
+        {% endfor %}
+      </main>
+    </div>
+  </div>
+</body>
+</html>
