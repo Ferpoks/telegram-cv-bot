@@ -7,17 +7,17 @@ CV Telegram Bot — HTML/CSS + DocRaptor + DOCX (Render-Ready)
 • Assets:
     - HTML templates: assets/html/<Template>_<lang>.html  (مثال: Navy_ar.html, Navy_en.html)
     - CSS مشترك اختياري: assets/html/base.css  (سيتم inlining تلقائيًا)
-• PDF/PNG عبر DocRaptor: ضع DOCRAPTOR_API_KEY في متغيرات البيئة.
+• PDF/PNG عبر DocRaptor: ضع DOCRAPTOR_API_KEY في المتغيرات البيئية.
 
-Recommended env vars (Render):
+ENV (Render):
 BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DB_PATH=/var/data/bot.db
 PORT=10000           # Render يمرره تلقائيًا، هذا احتياط
-OWNER_USERNAME=youruser   # VIP دائم
-OWNER_ID=0               # بديل لتحديد VIP دائم
-PAYLINK_UPGRADE_URL=https://your-pay-page
-DOCRAPTOR_API_KEY=dp_xxxxxxxxxxxxxxxxx
-ENABLE_PDF=0           # لتحويل DOCX->PDF عبر LibreOffice (اختياري)
+OWNER_USERNAME=youruser   # VIP دائم للمالك (اختياري)
+OWNER_ID=0                # بديل لتحديد VIP دائم (اختياري)
+PAYLINK_UPGRADE_URL=https://your-pay-page (اختياري)
+DOCRAPTOR_API_KEY=dp_xxxxxxxxxxxxxxxxx  (مطلوب للمعاينة/‏PDF)
+ENABLE_PDF=0  # لتحويل DOCX->PDF عبر LibreOffice (اختياري جدًا)
 """
 
 import asyncio
@@ -62,8 +62,8 @@ ENABLE_PDF = os.getenv("ENABLE_PDF", "0") == "1"
 DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY", "")
 PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "10000")))
 
-TEMPLATES_DIR = Path("assets/templates")
-HTML_TEMPLATES_DIR = Path("assets/html")
+TEMPLATES_DIR = Path("assets/templates")     # DOCX templates (اختياري)
+HTML_TEMPLATES_DIR = Path("assets/html")     # HTML/CSS templates (موصى بها)
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "/var/data/exports"))
 try:
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,6 +80,7 @@ except Exception:
 ) = range(21)
 
 TEMPLATES_INDEX = {
+    # خلّي HTML القوالب اللي أضفتها في assets/html بنفس الأسماء Navy/Modern
     "ar": [("Navy", "احترافي (شريط جانبي أزرق)"), ("Modern", "حديث"), ("ATS", "مطابق ATS"), ("Minimal", "بسيط"), ("Elegant", "أنيق")],
     "en": [("Navy", "Professional (Navy Sidebar)"), ("Modern", "Modern"), ("ATS", "ATS"), ("Minimal", "Minimal"), ("Elegant", "Elegant")],
 }
@@ -259,8 +260,9 @@ def render_docx_for_profile(pid:int, db:DB)->Path:
     if tpl_path.exists():
         doc=DocxTemplate(tpl_path); doc.render(ctx); doc.save(out_path); return out_path
 
-    # Auto simple DOCX (لا يعتمد على HTML)
+    # Auto simple DOCX (افتراضي)
     if Document is None: raise RuntimeError("No DOCX engine available")
+
     def shade_cell(cell,color_hex:str):
         tcPr=cell._tc.get_or_add_tcPr()
         shd=OxmlElement('w:shd'); shd.set(qn('w:val'),'clear'); shd.set(qn('w:color'),'auto'); shd.set(qn('w:fill'),color_hex)
@@ -299,40 +301,46 @@ def render_docx_for_profile(pid:int, db:DB)->Path:
     p=right.add_paragraph()
     r=p.add_run(ctx['full_name']); r.font.size=Pt(20); r.font.bold=True; r.font.color.rgb=NAVY
     if ctx['title']:
-        p.add_run("\n"); t=p.add_run(ctx['title']); t.font.size=Pt(12)
+        p.add_run("\n")   # ← مهم: سطر واحد، لا تكسره
+        t=p.add_run(ctx['title']); t.font.size=Pt(12)
     right.add_paragraph()
 
     h=right.add_paragraph('الملخص' if lang=='ar' else 'Summary'); h.runs[0].font.bold=True; h.runs[0].font.size=Pt(12)
     if ctx['summary']:
         for line in textwrap.wrap(ctx['summary'],width=120):
-            right.add_paragraph(line)
-
+            rp=right.add_paragraph(line); rp.paragraph_format.space_after=Pt(2)
     right.add_paragraph()
+
     h=right.add_paragraph('الخبرات' if lang=='ar' else 'Work Experience'); h.runs[0].font.bold=True; h.runs[0].font.size=Pt(12)
     for e in exps:
         p=right.add_paragraph(); rr=p.add_run(f"{e.get('role','')} — {e.get('company','')}"); rr.font.bold=True
         if e.get('start_date') or e.get('end_date'): p.add_run(f" ({e.get('start_date','')} - {e.get('end_date','')})")
-        for b in e.get('bullets',[])[:6]: right.add_paragraph(f"• {b}")
+        for b in e.get('bullets',[])[:6]:
+            bp=right.add_paragraph(f"• {b}"); bp.paragraph_format.space_after=Pt(0)
+    docx.add_paragraph()
+
     docx.save(out_path); return out_path
 
 def try_convert_to_pdf(docx_path:Path)->Path|None:
     if not ENABLE_PDF: return None
     lo=shutil.which("libreoffice") or shutil.which("soffice")
-    if not lo: return None
+    if not lo:
+        log.warning("LibreOffice not found; skipping PDF convert")
+        return None
     import subprocess
     try:
         subprocess.run([lo,"--headless","--convert-to","pdf","--outdir",str(docx_path.parent),str(docx_path)],
                        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         out=docx_path.with_suffix(".pdf")
         return out if out.exists() else None
-    except Exception:
+    except Exception as e:
+        log.exception("PDF convert failed: %s", e)
         return None
 
 # -------------- HTML/CSS rendering + DocRaptor --------------
 def _inline_local_css(html:str, base_dir:Path)->str:
     """
-    يستبدل <link rel="stylesheet" href="*.css"> بمحتوى CSS داخل <style>..
-    يدعم مسارات مثل base.css في assets/html.
+    يستبدل <link rel="stylesheet" href="*.css"> بمحتوى CSS داخل <style>.
     """
     def repl(match):
         href=match.group(1)
@@ -361,30 +369,30 @@ def render_html_for_profile(pid:int, db:DB)->str:
         "summary":_safe(profile.get("summary")),
         "experiences":exps, "education":edus,
         "skills":skills, "skills_list":skills_list,
-        "photo_data_uri":"",  # يمكن دعم رفع صورة لاحقًا
+        "photo_data_uri":"",  # إضافة لاحقة عند دعم الصور
     }
 
     tpl_path = HTML_TEMPLATES_DIR / f"{tpl_slug}_{lang}.html"
     if not tpl_path.exists():
-        # Fallback HTML بسيط
+        # Fallback HTML بسيط إذا القالب ناقص
         return f"""<!doctype html><meta charset="utf-8">
         <title>{ctx['full_name']}</title>
         <h1 style="font-family:Arial">{ctx['full_name']} — {ctx['title']}</h1>"""
 
     html_src = tpl_path.read_text(encoding="utf-8")
     html = Template(html_src).render(**ctx)
-    # inline CSS (base.css وغيره)
+    # inline CSS (مثل base.css)
     html = _inline_local_css(html, tpl_path.parent)
     return html
 
 async def docraptor_convert(html:str, kind:str="pdf")->bytes:
     """
-    kind: 'pdf' أو 'png' (معاينة). إن فشل PNG نرجع PDF ونرسله كوثيقة.
+    kind: 'pdf' أو 'png' (معاينة). يحتاج DOCRAPTOR_API_KEY.
     """
     if not DOCRAPTOR_API_KEY:
         raise RuntimeError("DOCRAPTOR_API_KEY is missing")
     payload = {"doc": {
-        "test": False,            # اجعله True لو تبغى watermark مع مجانية DocRaptor
+        "test": False,            # True لو تبغى watermark مجاني
         "document_type": kind,    # 'pdf' أو 'png'
         "name": f"cv.{kind}",
         "document_content": html
@@ -418,7 +426,7 @@ async def upgrade_cmd(update:Update, context:ContextTypes.DEFAULT_TYPE):
     if PAYLINK_UPGRADE_URL:
         await update.effective_message.reply_text(f"للترقية إلى VIP: {PAYLINK_UPGRADE_URL}")
     else:
-        await update.effective_message.reply_text("ضع PAYLINK_UPGRADE_URL في متغيرات البيئة.")
+        await update.effective_message.reply_text("ضع PAYLINK_UPGRADE_URL في المتغيرات البيئية.")
 
 # --- CV flow ---
 async def cv_entry(update:Update, context:ContextTypes.DEFAULT_TYPE):
@@ -582,20 +590,19 @@ async def show_export_menu(q, context:ContextTypes.DEFAULT_TYPE, pid:int):
 
 async def export_router(update:Update, context:ContextTypes.DEFAULT_TYPE):
     q=update.callback_query; await q.answer()
-    _,_,kind,pid = q.data.split(":"); pid=int(pid)
+    _, _, kind, pid = q.data.split(":"); pid=int(pid)
     user_id=q.from_user.id
 
-    if kind=="preview":
+    if kind == "preview":
         await q.edit_message_text("جارٍ إنشاء معاينة…")
         try:
             html=render_html_for_profile(pid, db)
             try:
-                png=await docraptor_convert(html, kind="png")  # قد لا يدعم كل الحسابات
+                png=await docraptor_convert(html, kind="png")  # قد يفشل على الخطة المجانية
                 out=EXPORTS_DIR/f"preview_{pid}.png"; out.write_bytes(png)
                 with open(out,"rb") as f:
                     await q.message.reply_photo(f, caption="هذه المعاينة. إذا مناسب اختر PDF أو DOCX.")
             except Exception as e:
-                # fallback: PDF كمعاينة
                 log.warning("PNG preview failed, falling back to PDF: %s", e)
                 pdf=await docraptor_convert(html, kind="pdf")
                 out=EXPORTS_DIR/f"preview_{pid}.pdf"; out.write_bytes(pdf)
@@ -661,7 +668,8 @@ async def create_app_and_site(app_tg: Application):
     async def health(request):
         return web.json_response({"ok": True, "service": "cvbot", "time": datetime.utcnow().isoformat()})
     app=web.Application()
-    app.add_routes([web.get("/",root), web.head("/",root), web.get("/health",health), web.head("/health",health)])
+    # مهم: سجّل GET فقط (HEAD يتولد تلقائيًا) — لا تسجّل web.head(..) حتى لا يظهر خطأ "method HEAD is already registered"
+    app.add_routes([web.get("/",root), web.get("/health",health)])
     runner=web.AppRunner(app); await runner.setup()
     site=web.TCPSite(runner, host="0.0.0.0", port=PORT); await site.start()
     log.info("aiohttp listening on :%s", PORT)
