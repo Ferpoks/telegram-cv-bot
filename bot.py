@@ -1,27 +1,37 @@
 # -*- coding: utf-8 -*-
 """
-CV Telegram Bot — Render-Ready with Template Previews
-=====================================================
+CV Telegram Bot — Render + DocRaptor (PrinceXML)
+================================================
 
-• Stack: python-telegram-bot v21.x (async), SQLite, docxtpl + (fallback) python-docx,
-  aiohttp mini server (/health), optional PDF via LibreOffice.
-• Deploy: Render (run_polling) — Web Service واحدة (بدون ويبهوك).
-• تخزين: يُفضّل قرص دائم على /var/data.
+• PTB v21.x (async), SQLite, docxtpl + python-docx (fallback DOCX), HTML→PDF عبر DocRaptor.
+• Deploy: Render (Web Service) باستخدام run_polling + aiohttp /health.
+• Persist: يُفضّل تفعيل Persistent Disk على /var/data.
 
-ENV VARS:
----------
-BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DB_PATH=/var/data/bot.db
-OWNER_USERNAME=Ferp0ks                 # اختياري
-PAYLINK_UPGRADE_URL=https://pay.link   # اختياري
-ENABLE_PDF=0                           # 1 لتفعيل تحويل PDF إذا LibreOffice متوفر
-PORT=10000                             # Render يحدد PORT تلقائيًا؛ نقرأه
+ENV (على Render):
+-----------------
+BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DOCRAPTOR_API_KEY=xxxxxxxxxxxxxxxxxxxxx
+DB_PATH=/var/data/bot.db                      # يوصى به مع الديسك
+OWNER_USERNAME=Ferp0ks                        # اختياري
+PAYLINK_UPGRADE_URL=https://pay.link/...      # اختياري
+PORT=10000                                    # Render يمرره تلقائيًا
+HTML_PROVIDER=docraptor                        # ثابت هنا لكن موجود لو حبيت تبدّل لاحقًا
 
-الأصول المقترحة (اختيارية):
----------------------------
-assets/templates/ATS_ar.docx, ATS_en.docx, Modern_ar.docx, Modern_en.docx, ...
-assets/previews/ATS_ar.jpg, ATS_en.jpg, Modern_ar.jpg, Modern_en.jpg, ...
+مجلدات/ملفات بالريبو:
+---------------------
+assets/html/Navy_ar.html, Navy_en.html        # قوالب HTML
+assets/previews/Navy_ar.jpg, Navy_en.jpg ...  # صور معاينة (اختياري)
+assets/templates/...                          # لو أردت DOCX مخصّص (اختياري)
+requirements.txt
+
+أوامر محلية:
+------------
+pip install -r requirements.txt
+python bot.py
+
+Start Command (Render):   python bot.py
 """
+import asyncio
 import json
 import logging
 import os
@@ -54,18 +64,21 @@ log = logging.getLogger("cvbot")
 DB_PATH = os.getenv("DB_PATH", "/var/data/bot.db")
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "")
 PAYLINK_UPGRADE_URL = os.getenv("PAYLINK_UPGRADE_URL", "")
-ENABLE_PDF = os.getenv("ENABLE_PDF", "0") == "1"
 PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "10000")))
-
 TEMPLATES_DIR = Path("assets/templates")
-PREVIEWS_DIR = Path("assets/previews")
+HTML_TEMPLATES_DIR = Path("assets/html")
 
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "/var/data/exports"))
 try:
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 except Exception:
+    # Fallback محلي لو ما فيه ديسك أثناء التشغيل
     EXPORTS_DIR = Path("./exports")
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# HTML→PDF Provider (DocRaptor)
+HTML_PROVIDER = os.getenv("HTML_PROVIDER", "docraptor").lower()
+DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY", "")
 
 # ============ Conversation States ============
 (
@@ -92,22 +105,9 @@ except Exception:
     CONFIRM_EXPORT,
 ) = range(21)
 
-# Slug -> label per language
 TEMPLATES_INDEX = {
-    "ar": [
-        ("ATS", "ATS (مطابق أنظمة التتبع)"),
-        ("Modern", "حديث"),
-        ("Minimal", "بسيط"),
-        ("Navy", "احترافي (شريط جانبي أزرق)"),
-        ("Elegant", "أنيق رمادي"),
-    ],
-    "en": [
-        ("ATS", "ATS"),
-        ("Modern", "Modern"),
-        ("Minimal", "Minimal"),
-        ("Navy", "Professional Navy Sidebar"),
-        ("Elegant", "Elegant Gray"),
-    ],
+    "ar": [("Navy", "احترافي (شريط جانبي أزرق)"), ("Elegant", "أنيق رمادي"), ("Modern", "حديث"), ("Minimal", "بسيط"), ("ATS", "مطابق ATS")],
+    "en": [("Navy", "Professional Navy Sidebar"), ("Elegant", "Elegant Gray"), ("Modern", "Modern"), ("Minimal", "Minimal"), ("ATS", "ATS")],
 }
 
 # ============ DB Helpers ============
@@ -143,7 +143,7 @@ class DB:
               full_name TEXT,
               phone TEXT, email TEXT, city TEXT, links TEXT,
               summary TEXT,
-              template TEXT DEFAULT 'ATS',
+              template TEXT DEFAULT 'Navy',
               lang TEXT DEFAULT 'ar',
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -200,7 +200,7 @@ class DB:
         cur.execute("UPDATE users SET vip=? WHERE user_id=?", (vip, user_id))
         con.commit(); con.close()
 
-    # Quota
+    # Quota (تحديد تصدير مجاني يومي لغير VIP)
     def can_export_today(self, user_id: int, free_limit: int = 1) -> bool:
         today = date.today().isoformat()
         con = self._conn(); cur = con.cursor()
@@ -305,12 +305,9 @@ class DB:
         con.close()
         return profile, exps, edus, skills
 
-# ============ Rendering ============
+# ============ DOCX Rendering (احتياطي/اختياري) ============
 from docxtpl import DocxTemplate  # type: ignore
-try:
-    from docx import Document  # python-docx fallback
-except Exception:
-    Document = None
+from docx import Document  # fallback generator
 
 def _safe(s: str | None) -> str:
     return s or ""
@@ -321,7 +318,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         raise RuntimeError("Profile not found")
     profile, exps, edus, skills = data
     lang = profile.get("lang", "ar")
-    tpl_slug = profile.get("template", "ATS")
+    tpl_slug = profile.get("template", "Navy")
 
     ctx = {
         "full_name": _safe(profile.get("full_name")),
@@ -335,7 +332,6 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         "education": edus,
         "skills": skills,
     }
-    # قوائم مهارات كنِقاط
     skills_list = [s.strip() for s in (skills or "").replace("؛", ",").split(",") if s.strip()]
     ctx["skills_list"] = skills_list
 
@@ -348,9 +344,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         doc.save(out_path)
         return out_path
 
-    # Fallback: DOCX احترافي بشريط جانبي كحلي
-    if Document is None:
-        raise RuntimeError("No template found and python-docx not installed")
+    # Fallback: DOCX بسيط (عشان ما نوقف العميل حتى لو مافي قوالب docx)
     from docx.shared import Inches, Pt, RGBColor
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
@@ -376,151 +370,117 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
 
     NAVY = RGBColor(31, 58, 95)
     WHITE = RGBColor(255, 255, 255)
-
     shade_cell(left, '1f3a5f')
 
     def add_left_heading(text):
         p = left.add_paragraph()
-        r = p.add_run(text.upper())
-        r.font.bold = True
-        r.font.size = Pt(10)
-        r.font.color.rgb = WHITE
-        p.space_after = Pt(2)
+        r = p.add_run(text if lang == 'ar' else text.upper())
+        r.font.bold = True; r.font.size = Pt(10); r.font.color.rgb = WHITE
 
     def add_left_line(text):
         p = left.add_paragraph()
-        r = p.add_run(text)
-        r.font.size = Pt(9)
-        r.font.color.rgb = WHITE
-        p.space_after = Pt(1)
+        r = p.add_run(text); r.font.size = Pt(9); r.font.color.rgb = WHITE
 
-    # Sidebar
-    add_left_heading('Contact' if lang=='en' else 'الاتصال')
-    for item in [ctx['phone'], ctx['email'], ctx['city']]:
-        if item:
-            add_left_line(item)
-    if ctx['links']:
-        add_left_line(ctx['links'])
+    add_left_heading('الاتصال' if lang=='ar' else 'CONTACT')
+    for item in [ctx['phone'], ctx['email'], ctx['city'], ctx['links']]:
+        if item: add_left_line(item)
+
     left.add_paragraph().space_after = Pt(6)
 
-    add_left_heading('Education' if lang=='en' else 'التعليم')
+    add_left_heading('التعليم' if lang=='ar' else 'EDUCATION')
     for ed in edus:
-        add_left_line(f"{ed.get('degree','')} — {ed.get('school','')}")
-        if ed.get('year'):
-            add_left_line(str(ed.get('year')))
+        add_left_line(f"{ed.get('degree','')} — {ed.get('school','')}" + (f" ({ed.get('year')})" if ed.get('year') else ""))
     left.add_paragraph().space_after = Pt(6)
 
-    add_left_heading('Skills' if lang=='en' else 'المهارات')
+    add_left_heading('المهارات' if lang=='ar' else 'SKILLS')
     if skills_list:
         for s_item in skills_list:
             add_left_line(f"• {s_item}")
-    elif ctx['skills']:
-        add_left_line(ctx['skills'])
 
-    # Right header
     p = right.add_paragraph()
-    name_run = p.add_run(ctx['full_name'])
-    name_run.font.size = Pt(20)
-    name_run.font.bold = True
-    name_run.font.color.rgb = NAVY
+    rname = p.add_run(ctx['full_name'])
+    rname.font.size = Pt(20); rname.font.bold = True; rname.font.color.rgb = NAVY
     if ctx['title']:
         p.add_run("\n")
-        t = p.add_run(ctx['title'])
-        t.font.size = Pt(12)
+        rtitle = p.add_run(ctx['title'])
+        rtitle.font.size = Pt(12)
     right.add_paragraph()
 
-    # Summary
-    hdr = right.add_paragraph('Summary' if lang=='en' else 'الملخص')
-    hdr.runs[0].font.size = Pt(12)
-    hdr.runs[0].font.bold = True
+    hdr = right.add_paragraph('الملخص' if lang=='ar' else 'Summary')
+    hdr.runs[0].font.size = Pt(12); hdr.runs[0].font.bold = True
     if ctx['summary']:
         for line in textwrap.wrap(ctx['summary'], width=120):
-            rp = right.add_paragraph(line)
-            rp.paragraph_format.space_after = Pt(2)
+            rp = right.add_paragraph(line); rp.paragraph_format.space_after = Pt(2)
     right.add_paragraph()
 
-    # Experience
-    hdr = right.add_paragraph('Work Experience' if lang=='en' else 'الخبرات')
-    hdr.runs[0].font.size = Pt(12)
-    hdr.runs[0].font.bold = True
+    hdr = right.add_paragraph('الخبرات' if lang=='ar' else 'Work Experience')
+    hdr.runs[0].font.size = Pt(12); hdr.runs[0].font.bold = True
     for e in exps:
         line = right.add_paragraph()
         r1 = line.add_run(f"{e.get('role','')} — {e.get('company','')}")
-        r1.font.bold = True
-        r1.font.size = Pt(11)
+        r1.font.bold = True; r1.font.size = Pt(11)
         if e.get('start_date') or e.get('end_date'):
             line.add_run(f" ({e.get('start_date','')} - {e.get('end_date','')})")
         for b in e.get('bullets', [])[:6]:
             bp = right.add_paragraph(f"• {b}")
             bp.paragraph_format.space_after = Pt(0)
-    docx.add_paragraph()
 
     docx.save(out_path)
     return out_path
 
-def try_convert_to_pdf(docx_path: Path) -> Path | None:
-    if not ENABLE_PDF:
-        return None
-    lo = shutil.which("libreoffice") or shutil.which("soffice")
-    if not lo:
-        log.warning("LibreOffice not found; skipping PDF convert")
-        return None
-    out_dir = docx_path.parent
-    cmd = [lo, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(docx_path)]
-    try:
-        import subprocess
-        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        pdf_path = docx_path.with_suffix(".pdf")
-        return pdf_path if pdf_path.exists() else None
-    except Exception as e:
-        log.exception("PDF convert failed: %s", e)
-        return None
+# ============ HTML → PDF (DocRaptor) ============
+from jinja2 import Template
+import httpx
 
-# ============ Preview helpers ============
-def _preview_path(slug: str, lang: str):
-    for ext in ("jpg", "jpeg", "png", "webp"):
-        p = PREVIEWS_DIR / f"{slug}_{lang}.{ext}"
-        if p.exists():
-            return p
-    return None
+def render_html_for_profile(pid: int, db: DB) -> str:
+    data = db.fetch_full_profile(pid)
+    if not data:
+        raise RuntimeError("Profile not found")
+    profile, exps, edus, skills = data
+    lang = profile.get("lang", "ar")
+    tpl_slug = profile.get("template", "Navy")
 
-def _template_label(slug: str, lang: str) -> str:
-    table = dict(TEMPLATES_INDEX.get(lang, []))
-    return table.get(slug, slug)
+    skills_list = [s.strip() for s in (skills or "").replace("؛", ",").split(",") if s.strip()]
+    ctx = {
+        "full_name": _safe(profile.get("full_name")),
+        "title": _safe(profile.get("title")),
+        "phone": _safe(profile.get("phone")),
+        "email": _safe(profile.get("email")),
+        "city": _safe(profile.get("city")),
+        "links": _safe(profile.get("links")),
+        "summary": _safe(profile.get("summary")),
+        "experiences": exps,
+        "education": edus,
+        "skills_list": skills_list,
+        "photo_data_uri": "",  # يمكن تفعيله لاحقًا
+    }
 
-def _template_selection_markup(lang: str, initial: bool = True, pid: int | None = None):
-    rows = []
-    for slug, name in TEMPLATES_INDEX[lang]:
-        choose_cb = f"cv:tpl:{slug}" if initial else f"cv:tplset:{slug}:{pid}"
-        prev_cb = f"cv:prev:{slug}:{lang}"
-        rows.append([
-            InlineKeyboardButton(f"👁️ معاينة — {name}", callback_data=prev_cb),
-            InlineKeyboardButton(f"اختيار {name}", callback_data=choose_cb),
-        ])
-    rows.append([InlineKeyboardButton("👁️👁️ معاينة جماعية", callback_data=f"cv:prevg:{lang}")])
-    if not initial and pid is not None:
-        rows.append([InlineKeyboardButton("⬅️ رجوع", callback_data=f"cv:menu:back:{pid}")])
-    return InlineKeyboardMarkup(rows)
+    path = HTML_TEMPLATES_DIR / f"{tpl_slug}_{lang}.html"
+    if not path.exists():
+        # Fallback HTML بسيط
+        return f"<html><meta charset='utf-8'><body><h1>{ctx['full_name']}</h1><p>{ctx['title']}</p><p>{ctx['summary']}</p></body></html>"
+    html = path.read_text(encoding="utf-8")
+    return Template(html).render(**ctx)
 
-async def _send_preview_photo(update_or_q, slug: str, lang: str, initial: bool = True, pid: int | None = None):
-    p = _preview_path(slug, lang)
-    caption = f"معاينة: { _template_label(slug, lang) }"
-    choose_cb = f"cv:tpl:{slug}" if initial else f"cv:tplset:{slug}:{pid}"
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("اختيار هذا القالب ✅", callback_data=choose_cb)]])
-    if p and p.exists():
-        with open(p, "rb") as f:
-            if isinstance(update_or_q, Update):
-                await update_or_q.effective_message.reply_photo(f, caption=caption, reply_markup=kb)
-            else:
-                q = update_or_q
-                await q.message.reply_photo(f, caption=caption, reply_markup=kb)
-    else:
-        txt = f"لا تتوفر صورة معاينة لهذا القالب ({slug}). أضف صورة إلى assets/previews/{slug}_{lang}.jpg"
-        if isinstance(update_or_q, Update):
-            await update_or_q.effective_message.reply_text(txt, reply_markup=kb)
-        else:
-            q = update_or_q
-            await q.message.reply_text(txt, reply_markup=kb)
+async def html_to_pdf_docraptor(html: str, test_mode: bool = False) -> bytes:
+    """
+    DocRaptor synchronous API: POST /docs (Basic Auth)
+    test_mode=True يضيف watermark لكنه مجاني للتجارب.
+    """
+    if not DOCRAPTOR_API_KEY:
+        raise RuntimeError("DOCRAPTOR_API_KEY is missing")
+    payload = {
+        "doc": {
+            "test": bool(test_mode),
+            "document_type": "pdf",
+            "name": "cv.pdf",
+            "document_content": html
+        }
+    }
+    async with httpx.AsyncClient(timeout=90) as client:
+        r = await client.post("https://api.docraptor.com/docs", auth=(DOCRAPTOR_API_KEY, ""), json=payload)
+        r.raise_for_status()
+        return r.content
 
 # ============ Bot Handlers ============
 db = DB(DB_PATH)
@@ -530,7 +490,7 @@ async def set_my_commands(app: Application):
         BotCommand("start", "ابدأ / Start"),
         BotCommand("cv", "إنشاء/تعديل السيرة"),
         BotCommand("upgrade", "الترقية إلى VIP"),
-        BotCommand("help", "مساعدة"),
+        BotCommand("help", "مساعدة")
     ]
     await app.bot.set_my_commands(cmds)
 
@@ -538,24 +498,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     db.ensure_user(u.id)
     await update.effective_message.reply_text(
-        "أهلًا! هذا بوت إنشاء سيرة ذاتية (CV) احترافي.\n"
-        "- أنشئ سيرة عربية أو إنجليزية\n"
-        "- اختر قالب (ATS/Modern/Minimal/Navy/Elegant) مع معاينة 👁️ قبل التصدير\n"
-        "- أضف خبرات/تعليم/مهارات\n"
-        "- صدّر DOCX (مجاني) و PDF و Cover Letter (VIP)\n\n"
-        "أرسل /cv للبدء."
+        "أهلًا! هذا بوت إنشاء سيرة ذاتية احترافية (HTML→PDF DocRaptor).\n"
+        "- أنشئ سيرة عربية/إنجليزية\n- اختر قالب احترافي\n- أضف خبرات/تعليم/مهارات\n"
+        "- DOCX (مجاني) + PDF عالي الجودة (VIP)\n\nأرسل /cv للبدء."
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text(
-        "/cv للبدء • /upgrade للترقية • للتواصل: @{}".format(OWNER_USERNAME or "admin")
-    )
+    await update.effective_message.reply_text("/cv للبدء • /upgrade للترقية • تواصل: @{}".format(OWNER_USERNAME or "admin"))
 
 async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if PAYLINK_UPGRADE_URL:
         await update.effective_message.reply_text(f"للترقية إلى VIP: {PAYLINK_UPGRADE_URL}")
     else:
-        await update.effective_message.reply_text("فعّل PAYLINK_UPGRADE_URL في المتغيرات البيئية لزر ترقية فعّال.")
+        await update.effective_message.reply_text("فعّل PAYLINK_UPGRADE_URL في المتغيرات البيئية.")
 
 # --- CV Flow ---
 async def cv_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -570,11 +525,11 @@ async def cv_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     lang = q.data.split(":")[-1]
     context.user_data["cv"]["lang"] = lang
-    await q.edit_message_text("اختر القالب أو استعرض المعاينات:",
-                              reply_markup=_template_selection_markup(lang, initial=True))
+    tpl_buttons = [[InlineKeyboardButton(name, callback_data=f"cv:tpl:{slug}")]
+                   for slug, name in TEMPLATES_INDEX[lang]]
+    await q.edit_message_text("اختر القالب:", reply_markup=InlineKeyboardMarkup(tpl_buttons))
     return ASK_TPL
 
-# initial choose (creation)
 async def cv_set_tpl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     tpl_slug = q.data.split(":")[-1]
@@ -582,46 +537,9 @@ async def cv_set_tpl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(f"تم اختيار قالب: {tpl_slug}\nأرسل اسمك الكامل:")
     return ASK_NAME
 
-# preview — initial and in-menu
-async def cv_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    _, _, slug, lang = q.data.split(":")
-    pid = context.user_data.get("cv", {}).get("pid")
-    initial = pid is None
-    await _send_preview_photo(q, slug, lang, initial=initial, pid=pid)
-    if initial:
-        await q.message.reply_text("اختر القالب أو استعرض المزيد:",
-                                   reply_markup=_template_selection_markup(lang, initial=True))
-        return ASK_TPL
-    else:
-        await q.message.reply_text("اختر القالب أو ارجع للقائمة:",
-                                   reply_markup=_template_selection_markup(lang, initial=False, pid=pid))
-        return MENU
-
-async def cv_preview_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    lang = q.data.split(":")[-1]
-    pid = context.user_data.get("cv", {}).get("pid")
-    initial = pid is None
-    sent_any = False
-    for slug, _name in TEMPLATES_INDEX.get(lang, []):
-        p = _preview_path(slug, lang)
-        if not p: continue
-        sent_any = True
-        await _send_preview_photo(q, slug, lang, initial=initial, pid=pid)
-    if not sent_any:
-        await q.message.reply_text("لا توجد صور معاينة مضافة بعد. أضفها إلى assets/previews/")
-    if initial:
-        await q.message.reply_text("اختر القالب:", reply_markup=_template_selection_markup(lang, initial=True))
-        return ASK_TPL
-    else:
-        await q.message.reply_text("اختر القالب أو ارجع للقائمة:",
-                                   reply_markup=_template_selection_markup(lang, initial=False, pid=pid))
-        return MENU
-
 async def cv_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["full_name"] = update.message.text.strip()
-    await update.message.reply_text("اكتب المسمى الوظيفي المستهدف (مثال: محلّل بيانات / Data Analyst):")
+    await update.message.reply_text("المسمى الوظيفي المستهدف:")
     return ASK_TITLE
 
 async def cv_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -641,12 +559,12 @@ async def cv_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cv_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["city"] = update.message.text.strip()
-    await update.message.reply_text("روابطك (LinkedIn/GitHub) إن وجدت، مفصولة بفواصل، أو اكتب - لا يوجد -:")
+    await update.message.reply_text("روابطك (LinkedIn/GitHub) إن وجدت، مفصولة بفواصل:")
     return ASK_LINKS
 
 async def cv_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["links"] = update.message.text.strip()
-    await update.message.reply_text("اكتب ملخّصًا قصيرًا (3-4 أسطر) عن خبرتك ومهاراتك:")
+    await update.message.reply_text("اكتب ملخّصًا قصيرًا (3-4 أسطر):")
     return ASK_SUMMARY
 
 async def cv_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -654,7 +572,7 @@ async def cv_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     cv = context.user_data["cv"]
     db.ensure_user(u.id, cv.get("lang", "ar"))
-    pid = db.new_profile(u.id, cv.get("lang", "ar"), cv.get("template", "ATS"))
+    pid = db.new_profile(u.id, cv.get("lang", "ar"), cv.get("template", "Navy"))
     db.update_profile(
         pid,
         full_name=cv.get("full_name"), title=cv.get("title"), phone=cv.get("phone"),
@@ -670,14 +588,12 @@ async def show_menu(update_or_q, context: ContextTypes.DEFAULT_TYPE, pid: int):
         "• أضف خبرات العمل\n"
         "• أضف التعليم\n"
         "• عيّن المهارات\n"
-        "• 🖼️ تغيير القالب\n"
         "• معاينة/تصدير"
     )
     kb = [
         [InlineKeyboardButton("➕ إضافة خبرة", callback_data=f"cv:menu:addexp:{pid}")],
         [InlineKeyboardButton("🎓 إضافة تعليم", callback_data=f"cv:menu:addedu:{pid}")],
         [InlineKeyboardButton("🧩 تعيين المهارات", callback_data=f"cv:menu:skills:{pid}")],
-        [InlineKeyboardButton("🖼️ تغيير القالب", callback_data=f"cv:menu:tpl:{pid}")],
         [InlineKeyboardButton("📤 معاينة/تصدير", callback_data=f"cv:menu:export:{pid}")],
     ]
     if isinstance(update_or_q, Update):
@@ -705,16 +621,6 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "export":
         await q.edit_message_text("خيارات التصدير:")
         return await show_export_menu(q, context, pid)
-    if action == "tpl":
-        profile, *_ = db.fetch_full_profile(pid)
-        lang = profile.get("lang", "ar")
-        context.user_data.setdefault("cv", {})["pid"] = pid
-        await q.edit_message_text("غيّر القالب أو استعرض المعاينات:",
-                                  reply_markup=_template_selection_markup(lang, initial=False, pid=pid))
-        return MENU
-    if action == "back":
-        await show_menu(q, context, pid)
-        return MENU
 
 # --- Experience flow ---
 async def exp_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -734,7 +640,7 @@ async def exp_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def exp_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["exp"]["end_date"] = update.message.text.strip()
-    await update.message.reply_text("أرسل نقاط الإنجاز في هذه الخبرة، كل سطر نقطة (أرسل جميع النقاط برسالة واحدة):")
+    await update.message.reply_text("أرسل نقاط الإنجاز، كل سطر نقطة (أرسلها برسالة واحدة):")
     return EXP_BULLETS
 
 async def exp_bullets(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -742,13 +648,13 @@ async def exp_bullets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     e = context.user_data.get("exp", {})
     db.add_experience(e["pid"], e["company"], e["role"], e["start_date"], e["end_date"], lines)
     await update.message.reply_text("تمت إضافة الخبرة.")
-    await show_menu(update, context, e["pid"])
+    await show_menu(update, context, e["pid"]) 
     return MENU
 
 # --- Education flow ---
 async def edu_degree(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edu"]["degree"] = update.message.text.strip()
-    await update.message.reply_text("التخصص (مثال: علوم الحاسب):")
+    await update.message.reply_text("التخصص:")
     return EDU_MAJOR
 
 async def edu_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -758,7 +664,7 @@ async def edu_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edu_school(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edu"]["school"] = update.message.text.strip()
-    await update.message.reply_text("سنة التخرج (مثال: 2024):")
+    await update.message.reply_text("سنة التخرج:")
     return EDU_YEAR
 
 async def edu_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -766,7 +672,7 @@ async def edu_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ed = context.user_data["edu"]
     db.add_education(ed["pid"], ed["degree"], ed["major"], ed["school"], ed["year"])
     await update.message.reply_text("تمت إضافة التعليم.")
-    await show_menu(update, context, ed["pid"])
+    await show_menu(update, context, ed["pid"]) 
     return MENU
 
 # --- Skills ---
@@ -783,7 +689,7 @@ async def show_export_menu(q, context: ContextTypes.DEFAULT_TYPE, pid: int):
     user_id = q.from_user.id
     buttons = [[InlineKeyboardButton("📄 تصدير DOCX", callback_data=f"cv:export:docx:{pid}")]]
     if db.is_vip(user_id):
-        buttons.append([InlineKeyboardButton("🧾 تصدير PDF", callback_data=f"cv:export:pdf:{pid}")])
+        buttons.append([InlineKeyboardButton("🧾 تصدير PDF (جودة عالية)", callback_data=f"cv:export:pdf:{pid}")])
         buttons.append([InlineKeyboardButton("✉️ Cover Letter", callback_data=f"cv:export:cover:{pid}")])
     else:
         buttons.append([InlineKeyboardButton("⭐ ترقية إلى VIP", url=PAYLINK_UPGRADE_URL or "https://example.com")])
@@ -812,16 +718,22 @@ async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not db.is_vip(user_id):
             await q.edit_message_text("ميزة PDF لعملاء VIP فقط.")
             return ConversationHandler.END
-        await q.edit_message_text("جارٍ إنشاء PDF…")
-        docx_path = render_docx_for_profile(pid, db)
-        pdf_path = try_convert_to_pdf(docx_path)
-        if not pdf_path:
-            await q.message.reply_text("تعذر تحويل PDF على الخادم. تم إرسال DOCX بدلًا منه.")
+        await q.edit_message_text("جارٍ توليد PDF الاحترافي…")
+        html = render_html_for_profile(pid, db)
+        try:
+            # test_mode=False لعملاء VIP (بدون ووتـرمارك)
+            pdf_bytes = await html_to_pdf_docraptor(html, test_mode=False)
+        except Exception as e:
+            await q.message.reply_text(f"فشل DocRaptor: {e}\n(سأرسل DOCX بدلًا منه)")
+            docx_path = render_docx_for_profile(pid, db)
             with open(docx_path, "rb") as f:
                 await q.message.reply_document(InputFile(f, filename=docx_path.name))
-        else:
-            with open(pdf_path, "rb") as f:
-                await q.message.reply_document(InputFile(f, filename=pdf_path.name), caption="PDF جاهز ✅")
+            return MENU
+
+        out = EXPORTS_DIR / f"cv_{pid}.pdf"
+        out.write_bytes(pdf_bytes)
+        with open(out, "rb") as f:
+            await q.message.reply_document(InputFile(f, filename=out.name), caption="PDF جاهز ✅")
         await show_menu(q, context, pid)
         return MENU
 
@@ -832,14 +744,14 @@ async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         profile, exps, edus, skills = db.fetch_full_profile(pid)
         lang = profile.get("lang", "ar")
         body = (
-            f"السادة المحترمون،\n\nأود التقدم لوظيفة {profile.get('title','')}،\n"
-            f"أمتلك خبرات ذات صلة، وأبرُز إنجازاتي في بيئات عمل ديناميكية.\n"
-            f"أرفقت سيرتي الذاتية، وأتطلع لفرصة مقابلة لمناقشة مدى مواءمتي للفريق.\n\n"
+            f"السادة المحترمون،\n\n"
+            f"أتقدم لوظيفة {profile.get('title','')}.\n"
+            f"لدي خبرات وإنجازات ذات صلة، وأتطلع لفرصة مقابلة.\n\n"
             f"تحياتي،\n{profile.get('full_name','')}\n{profile.get('phone','')} • {profile.get('email','')}"
         ) if lang == "ar" else (
-            f"Dear Hiring Team,\n\nI am applying for the {profile.get('title','')} role. "
-            f"I bring relevant experience and a track record of delivering impact.\n"
-            f"Please find my resume attached. I would welcome the opportunity to discuss my fit.\n\n"
+            f"Dear Hiring Team,\n\n"
+            f"I am applying for the {profile.get('title','')} role.\n"
+            f"I bring relevant experience and would welcome the chance to discuss.\n\n"
             f"Kind regards,\n{profile.get('full_name','')}\n{profile.get('phone','')} • {profile.get('email','')}"
         )
         fn = EXPORTS_DIR / f"cover_{pid}.txt"
@@ -855,15 +767,11 @@ async def create_app_and_site(app_tg: Application):
         return web.Response(text="OK")
 
     async def health(request):
+        # تنبيه: datetime.utcnow() مقبول هنا
         return web.json_response({"ok": True, "service": "cvbot", "time": datetime.utcnow().isoformat()})
 
     app = web.Application()
-    app.add_routes([
-        web.get("/", root),
-        web.get("/health", health),
-        web.head("/", root),
-        web.head("/health", health),
-    ])
+    app.add_routes([web.get("/", root), web.get("/health", health), web.head("/", root), web.head("/health", health)])
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
@@ -889,11 +797,7 @@ def main():
         entry_points=[CommandHandler("cv", cv_entry)],
         states={
             ASK_LANG: [CallbackQueryHandler(cv_set_lang, pattern=r"^cv:lang:")],
-            ASK_TPL: [
-                CallbackQueryHandler(cv_set_tpl, pattern=r"^cv:tpl:"),
-                CallbackQueryHandler(cv_preview, pattern=r"^cv:prev:"),
-                CallbackQueryHandler(cv_preview_all, pattern=r"^cv:prevg:"),
-            ],
+            ASK_TPL: [CallbackQueryHandler(cv_set_tpl, pattern=r"^cv:tpl:")],
             ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_name)],
             ASK_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_title)],
             ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_phone)],
@@ -902,24 +806,7 @@ def main():
             ASK_LINKS: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_links)],
             ASK_SUMMARY: [MessageHandler(filters.TEXT & ~filters.COMMAND, cv_summary)],
 
-            MENU: [
-                CallbackQueryHandler(menu_router, pattern=r"^cv:menu:"),
-                CallbackQueryHandler(cv_preview, pattern=r"^cv:prev:"),
-                CallbackQueryHandler(cv_preview_all, pattern=r"^cv:prevg:"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),  # placeholder
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                CallbackQueryHandler(lambda u, c: None, pattern=r"$^"),
-                # set template for existing profile
-                CallbackQueryHandler(cv_tpl_set, pattern=r"^cv:tplset:"),
-            ],
+            MENU: [CallbackQueryHandler(menu_router, pattern=r"^cv:menu:")],
 
             EXP_ROLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, exp_role)],
             EXP_COMPANY: [MessageHandler(filters.TEXT & ~filters.COMMAND, exp_company)],
@@ -946,18 +833,7 @@ def main():
     log.info("Bot starting…")
     application.run_polling()
 
-# set template for existing profile
-async def cv_tpl_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    _, _, slug, pid_s = q.data.split(":")
-    pid = int(pid_s)
-    db.update_profile(pid, template=slug)
-    profile, *_ = db.fetch_full_profile(pid)
-    lang = profile.get("lang", "ar")
-    await q.edit_message_text(f"تم تغيير القالب إلى: { _template_label(slug, lang) }")
-    await show_menu(q, context, pid)
-    return MENU
-
 if __name__ == "__main__":
     main()
+
 
