@@ -1,80 +1,82 @@
 <!doctype html>
-<html lang="en" dir="ltr">
+<html lang="en">
 <head>
-<meta charset="utf-8">
-<title>{{ full_name }} - {{ title }}</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;800&display=swap" rel="stylesheet">
-<style>
-  :root{--navy:#1f3a5f; --text:#1f2937; --muted:#6b7280; --line:#e5e7eb; --accent:#0ea5b6;}
-  *{box-sizing:border-box}
-  html,body{margin:0;padding:0;background:#fff;color:var(--text);font:14px/1.55 "Inter",system-ui,Arial}
-  @page{size:A4;margin:0}
-  .page{width:210mm;height:297mm;margin:0 auto}
-  .wrap{display:table;width:100%;height:100%;border-collapse:collapse}
-  .sidebar{display:table-cell;width:70mm;vertical-align:top;background:var(--navy);color:#fff;padding:16mm 12mm}
-  .content{display:table-cell;vertical-align:top;padding:16mm 18mm}
-  .photo{width:42mm;height:42mm;object-fit:cover;border-radius:50%;border:3px solid rgba(255,255,255,.25);margin:0 0 8mm}
-  .s-head{font-weight:800;margin:7mm 0 3mm;font-size:12pt}
-  .s-item{margin:2mm 0;color:#e7eef9;font-size:10.5pt}
-  .name{font:800 22pt/1.2 "Inter";color:var(--navy);margin:0}
-  .role{margin:2mm 0 8mm;color:var(--muted);font-size:12pt}
-  h2{font-size:12.5pt;color:var(--navy);margin:8mm 0 3mm}
-  .sep{height:1px;background:var(--line);margin:4mm 0 6mm}
-  .item{margin:4mm 0 6mm;page-break-inside:avoid}
-  .job{font-weight:700}
-  .meta{color:var(--muted);font-size:10pt;margin-left:4px}
-  ul{list-style:none;margin:2mm 0 0;padding:0}
-  li{margin:1.6mm 0;position:relative;padding-left:5mm}
-  li::before{content:"•";position:absolute;left:0;top:0;color:var(--accent)}
-</style>
+  <meta charset="utf-8">
+  <title>{{ full_name }} — {{ title }}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="base.css">
+  <style>
+    body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto}
+  </style>
 </head>
 <body>
   <div class="page">
-    <div class="wrap">
-      <aside class="sidebar">
-        {% if photo_data_uri %}<img class="photo" src="{{ photo_data_uri }}" alt="photo">{% endif %}
-        <div class="s-head">About</div>
-        <div class="s-item">{{ summary }}</div>
+    <aside class="sidebar">
+      {% if photo_data_uri %}
+      <div class="photo"><img src="{{ photo_data_uri }}" alt="photo"></div>
+      {% endif %}
+      <h1 class="sb-name">{{ full_name }}</h1>
+      {% if title %}<div class="sb-title">{{ title }}</div>{% endif %}
 
-        <div class="s-head">Contact</div>
-        {% if phone %}<div class="s-item">📞 {{ phone }}</div>{% endif %}
-        {% if email %}<div class="s-item">✉️ {{ email }}</div>{% endif %}
-        {% if city %}<div class="s-item">📍 {{ city }}</div>{% endif %}
-        {% if links %}<div class="s-item">🔗 {{ links }}</div>{% endif %}
+      <div class="sb-section">
+        <div class="sb-h">Contact</div>
+        {% if phone %}<div class="sb-line">{{ phone }}</div>{% endif %}
+        {% if email %}<div class="sb-line">{{ email }}</div>{% endif %}
+        {% if city  %}<div class="sb-line">{{ city }}</div>{% endif %}
+        {% if links %}<div class="sb-line">{{ links }}</div>{% endif %}
+      </div>
 
+      <div class="sb-section">
+        <div class="sb-h">Skills</div>
         {% if skills_list %}
-          <div class="s-head">Skills</div>
-          {% for s in skills_list %}<div class="s-item">• {{ s }}</div>{% endfor %}
-        {% endif %}
+          <div class="chips">
+            {% for s in skills_list %}<span class="chip">{{ s }}</span>{% endfor %}
+          </div>
+        {% elif skills %}<div class="sb-line">{{ skills }}</div>{% endif %}
+      </div>
 
-        {% if education %}
-          <div class="s-head">Education</div>
-          {% for ed in education %}
-            <div class="s-item">{{ ed.degree }} — {{ ed.school }}{% if ed.year %} ({{ ed.year }}){% endif %}</div>
-          {% endfor %}
-        {% endif %}
-      </aside>
+      {% if education %}
+      <div class="sb-section">
+        <div class="sb-h">Education</div>
+        {% for e in education %}
+          <div class="sb-line"><b>{{ e.degree }}</b></div>
+          <div class="sb-line">{{ e.school }}{% if e.year %} — {{ e.year }}{% endif %}</div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </aside>
 
-      <main class="content">
-        <h1 class="name">{{ full_name }}</h1>
-        <div class="role">{{ title }}</div>
+    <main class="content">
+      <h1 class="name">{{ full_name }}</h1>
+      {% if title %}<div class="role">{{ title }}</div>{% endif %}
 
-        <h2>Professional Experience</h2>
-        <div class="sep"></div>
+      {% if summary %}
+      <section class="section">
+        <div class="h">Profile</div>
+        <div class="summary">{{ summary }}</div>
+      </section>
+      {% endif %}
+
+      {% if experiences %}
+      <section class="section">
+        <div class="h">Professional Experience</div>
         {% for e in experiences %}
-          <div class="item">
-            <div class="job">{{ e.role }} — {{ e.company }}
-              {% if e.start_date or e.end_date %}<span class="meta">({{ e.start_date }} - {{ e.end_date }})</span>{% endif %}
+          <div class="job">
+            <div class="row">
+              <div class="role2">{{ e.role }}</div>
+              <div class="dates">{% if e.start_date %}{{ e.start_date }}{% endif %}{% if e.end_date %} – {{ e.end_date }}{% endif %}</div>
             </div>
+            <div class="company">{{ e.company }}</div>
             {% if e.bullets %}
-              <ul>
+            <ul class="bullets">
               {% for b in e.bullets %}<li>{{ b }}</li>{% endfor %}
-              </ul>
+            </ul>
             {% endif %}
           </div>
         {% endfor %}
-      </main>
-    </div>
+      </section>
+      {% endif %}
+    </main>
   </div>
 </body>
 </html>
