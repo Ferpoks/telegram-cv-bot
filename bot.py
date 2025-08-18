@@ -11,16 +11,16 @@ ENV (على Render):
 BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 DOCRAPTOR_API_KEY=xxxxxxxxxxxxxxxxxxxxx
 DB_PATH=/var/data/bot.db
-OWNER_USERNAME=YourUserName  # بدون @ (اختياري)
-OWNER_ID=123456789           # بديل للاسم (اختياري)
-PAYLINK_UPGRADE_URL=https://payment.paylink.sa/pay/product/....   # زر ترقية
-PORT=10000                   # Render يمرره تلقائيًا
+OWNER_USERNAME=YourUserName   # بدون @ (اختياري)
+OWNER_ID=123456789            # بديل للاسم (اختياري)
+PAYLINK_UPGRADE_URL=https://payment.paylink.sa/....   # زر ترقية اختياري
+PORT=10000                    # Render يحددها تلقائيًا
 
-مجلدات بالريبو:
----------------
-assets/html/Navy_ar.html, Navy_en.html   # قوالب HTML
-assets/previews/Navy_ar.jpg ...          # (اختياري) صور معاينة
-assets/templates/...                     # (اختياري) لو عندك DOCX قوالب
+قوالب HTML:
+-----------
+ضع الملفات داخل: assets/html/
+- Navy_ar.html
+- Navy_en.html
 
 Start Command (Render):   python bot.py
 Build Command:            pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
@@ -59,8 +59,9 @@ OWNER_USERNAME = os.getenv("OWNER_USERNAME", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 PAYLINK_UPGRADE_URL = os.getenv("PAYLINK_UPGRADE_URL", "")
 PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "10000")))
-TEMPLATES_DIR = Path("assets/templates")
-HTML_TEMPLATES_DIR = Path("assets/html")
+
+TEMPLATES_DIR = Path("assets/templates")          # لقوالب DOCX إن وجدت
+HTML_TEMPLATES_DIR = Path("assets/html")          # لقوالب HTML (DocRaptor)
 
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "/var/data/exports"))
 try:
@@ -70,7 +71,6 @@ except Exception:
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # DocRaptor
-HTML_PROVIDER = "docraptor"
 DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY", "")
 
 # ============ Conversation States ============
@@ -163,14 +163,14 @@ class DB:
               skills TEXT
             );
 
-            -- Daily quota (unused الآن، أبقيناه احتياط)
+            -- Daily quota (غير مستخدم الآن – أبقيناه احتياط)
             CREATE TABLE IF NOT EXISTS cv_quota(
               user_id INTEGER PRIMARY KEY,
               daily_used INTEGER DEFAULT 0,
               last_reset DATE
             );
 
-            -- Free once (lifetime) لكل مستخدم غير VIP
+            -- Free once (مدى الحياة) لغير الـVIP
             CREATE TABLE IF NOT EXISTS cv_once(
               user_id INTEGER PRIMARY KEY,
               used INTEGER DEFAULT 0
@@ -235,7 +235,7 @@ class DB:
         )
         con.commit(); con.close()
 
-    def add_experience(self, pid: int, company: str, role: str, start_date: str, end_date: str, bullets: list[str]):
+    def add_experience(self, pid: int, company: str, role: str, start_date: str, end_date: str, bullets):
         con = self._conn(); cur = con.cursor()
         cur.execute(
             "INSERT INTO cv_experience(profile_id, company, role, start_date, end_date, bullets) VALUES(?,?,?,?,?,?)",
@@ -289,7 +289,7 @@ class DB:
         con.close()
         return profile, exps, edus, skills
 
-# ============ Helpers ============
+# Helper: detect owner (always VIP)
 def user_is_owner(u) -> bool:
     try:
         if OWNER_ID and getattr(u, "id", None) == OWNER_ID:
@@ -329,6 +329,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         "education": edus,
         "skills": skills,
     }
+    # derived fields
     skills_list = [s.strip() for s in (skills or "").replace("؛", ",").split(",") if s.strip()]
     ctx["skills_list"] = skills_list
 
@@ -341,7 +342,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         doc.save(out_path)
         return out_path
 
-    # Fallback: DOCX جميل (شريط جانبي كحلي)
+    # Fallback: DOCX بسيط بشكل احترافي (شريط جانبي كحلي)
     from docx.shared import Inches, Pt, RGBColor
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
@@ -398,7 +399,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
     rname = p.add_run(ctx['full_name'])
     rname.font.size = Pt(20); rname.font.bold = True; rname.font.color.rgb = NAVY
     if ctx['title']:
-        p.add_run("\n")                  # ← ← تم تصحيحها
+        p.add_run("\n")                  # ← تصحيح خط سطر جديد
         rtitle = p.add_run(ctx['title'])
         rtitle.font.size = Pt(12)
     right.add_paragraph()
@@ -422,6 +423,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
             bp = right.add_paragraph(f"• {b}")
             bp.paragraph_format.space_after = Pt(0)
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     docx.save(out_path)
     return out_path
 
@@ -449,12 +451,11 @@ def render_html_for_profile(pid: int, db: DB) -> str:
         "experiences": exps,
         "education": edus,
         "skills_list": skills_list,
-        "photo_data_uri": "",  # يمكن إضافة صورة شخصية لاحقًا
+        "photo_data_uri": "",  # يمكن إضافة صورة شخصية لاحقاً
     }
 
     path = HTML_TEMPLATES_DIR / f"{tpl_slug}_{lang}.html"
     if not path.exists():
-        # Fallback HTML بسيط
         return f"<html><meta charset='utf-8'><body><h1>{ctx['full_name']}</h1><p>{ctx['title']}</p><p>{ctx['summary']}</p></body></html>"
     html = path.read_text(encoding="utf-8")
     return Template(html).render(**ctx)
@@ -828,5 +829,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
