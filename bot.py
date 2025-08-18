@@ -6,25 +6,22 @@ CV Telegram Bot — Render + DocRaptor (PrinceXML)
 • PTB v21.x (async), SQLite, docxtpl + python-docx (fallback DOCX), HTML→PDF عبر DocRaptor.
 • Deploy: Render (Web Service) باستخدام run_polling + aiohttp /health.
 
-ENV (على Render):
------------------
-BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DOCRAPTOR_API_KEY=xxxxxxxxxxxxxxxxxxxxx
+ENV (Render):
+-------------
+BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DOCRAPTOR_API_KEY=xxxxxxxxxxxxxxxxxxx
 DB_PATH=/var/data/bot.db
-OWNER_USERNAME=YourUserName   # بدون @ (اختياري)
-OWNER_ID=123456789            # بديل للاسم (اختياري)
-PAYLINK_UPGRADE_URL=https://payment.paylink.sa/....   # زر ترقية اختياري
-PORT=10000                    # Render يحددها تلقائيًا
+OWNER_USERNAME=YourUserName   # أو OWNER_ID=123456789
+PAYLINK_UPGRADE_URL=https://payment.paylink.sa/...
+PORT=10000  # Render يمرره تلقائيًا
 
-قوالب HTML:
------------
-ضع الملفات داخل: assets/html/
-- Navy_ar.html
-- Navy_en.html
-
-Start Command (Render):   python bot.py
-Build Command:            pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+القوالب:
+--------
+ضع القوالب الاحترافية هنا:
+assets/html/Navy_ar.html
+assets/html/Navy_en.html
 """
+
 import json
 import logging
 import os
@@ -60,7 +57,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 PAYLINK_UPGRADE_URL = os.getenv("PAYLINK_UPGRADE_URL", "")
 PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "10000")))
 
-TEMPLATES_DIR = Path("assets/templates")          # لقوالب DOCX إن وجدت
+TEMPLATES_DIR = Path("assets/templates")          # لقوالب DOCX (اختياري)
 HTML_TEMPLATES_DIR = Path("assets/html")          # لقوالب HTML (DocRaptor)
 
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "/var/data/exports"))
@@ -163,14 +160,7 @@ class DB:
               skills TEXT
             );
 
-            -- Daily quota (غير مستخدم الآن – أبقيناه احتياط)
-            CREATE TABLE IF NOT EXISTS cv_quota(
-              user_id INTEGER PRIMARY KEY,
-              daily_used INTEGER DEFAULT 0,
-              last_reset DATE
-            );
-
-            -- Free once (مدى الحياة) لغير الـVIP
+            -- Free once (lifetime) for non-VIP
             CREATE TABLE IF NOT EXISTS cv_once(
               user_id INTEGER PRIMARY KEY,
               used INTEGER DEFAULT 0
@@ -302,7 +292,7 @@ def user_is_owner(u) -> bool:
             return True
     return False
 
-# ============ DOCX Rendering (fallback/optional) ============
+# ============ DOCX Rendering (fallback/اختياري) ============
 from docxtpl import DocxTemplate  # type: ignore
 from docx import Document  # fallback generator
 
@@ -329,7 +319,6 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         "education": edus,
         "skills": skills,
     }
-    # derived fields
     skills_list = [s.strip() for s in (skills or "").replace("؛", ",").split(",") if s.strip()]
     ctx["skills_list"] = skills_list
 
@@ -342,7 +331,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         doc.save(out_path)
         return out_path
 
-    # Fallback: DOCX بسيط بشكل احترافي (شريط جانبي كحلي)
+    # Fallback DOCX احترافي مبسّط (شريط جانبي كحلي)
     from docx.shared import Inches, Pt, RGBColor
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
@@ -382,7 +371,6 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
     add_left_heading('الاتصال' if lang=='ar' else 'CONTACT')
     for item in [ctx['phone'], ctx['email'], ctx['city'], ctx['links']]:
         if item: add_left_line(item)
-
     left.add_paragraph().space_after = Pt(6)
 
     add_left_heading('التعليم' if lang=='ar' else 'EDUCATION')
@@ -399,7 +387,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
     rname = p.add_run(ctx['full_name'])
     rname.font.size = Pt(20); rname.font.bold = True; rname.font.color.rgb = NAVY
     if ctx['title']:
-        p.add_run("\n")                  # ← تصحيح خط سطر جديد
+        p.add_run("\n")                 # ← مهم: سطر جديد صحيح
         rtitle = p.add_run(ctx['title'])
         rtitle.font.size = Pt(12)
     right.add_paragraph()
@@ -451,7 +439,7 @@ def render_html_for_profile(pid: int, db: DB) -> str:
         "experiences": exps,
         "education": edus,
         "skills_list": skills_list,
-        "photo_data_uri": "",  # يمكن إضافة صورة شخصية لاحقاً
+        "photo_data_uri": "",
     }
 
     path = HTML_TEMPLATES_DIR / f"{tpl_slug}_{lang}.html"
@@ -461,22 +449,17 @@ def render_html_for_profile(pid: int, db: DB) -> str:
     return Template(html).render(**ctx)
 
 async def html_to_pdf_docraptor(html: str, test_mode: bool = False) -> bytes:
-    """
-    DocRaptor synchronous API: POST /docs (Basic Auth)
-    test_mode=True يضيف watermark لكنه مجاني للتجارب.
-    """
     if not DOCRAPTOR_API_KEY:
-        raise RuntimeError("DOCRAPTOR_API_KEY is missing")
-    payload = {
-        "doc": {
-            "test": bool(test_mode),
-            "document_type": "pdf",
-            "name": "cv.pdf",
-            "document_content": html
-        }
-    }
+        raise RuntimeError("DOCRAPTOR_API_KEY missing")
+    payload = {"doc": {
+        "test": bool(test_mode),
+        "document_type": "pdf",
+        "name": "cv.pdf",
+        "document_content": html
+    }}
     async with httpx.AsyncClient(timeout=90) as client:
-        r = await client.post("https://api.docraptor.com/docs", auth=(DOCRAPTOR_API_KEY, ""), json=payload)
+        r = await client.post("https://api.docraptor.com/docs",
+                              auth=(DOCRAPTOR_API_KEY, ""), json=payload)
         r.raise_for_status()
         return r.content
 
@@ -766,10 +749,8 @@ async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def create_app_and_site(app_tg: Application):
     async def root(request):
         return web.Response(text="OK")
-
     async def health(request):
         return web.json_response({"ok": True, "service": "cvbot", "time": datetime.utcnow().isoformat()})
-
     app = web.Application()
     app.add_routes([web.get("/", root), web.get("/health", health), web.head("/", root), web.head("/health", health)])
     runner = web.AppRunner(app)
