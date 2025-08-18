@@ -1,35 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-CV Telegram Bot — Render + DocRaptor (PrinceXML)
-================================================
+CV Telegram Bot — Render‑Ready
+==============================
 
-• PTB v21.x (async), SQLite, docxtpl + python-docx (fallback DOCX), HTML→PDF عبر DocRaptor.
-• Deploy: Render (Web Service) باستخدام run_polling + aiohttp /health.
-• Persist: يُفضّل تفعيل Persistent Disk على /var/data.
+• Stack: python-telegram-bot v21.x (async), SQLite, docxtpl + (fallback) python-docx, aiohttp mini server (/health), optional PDF export via LibreOffice if available.
+• Deploy: Render (run_polling) — works as a single Web Service. No webhook required.
+• Storage: /var/data persistent disk is recommended on Render.
 
-ENV (على Render):
------------------
-BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-DOCRAPTOR_API_KEY=xxxxxxxxxxxxxxxxxxxxx
-DB_PATH=/var/data/bot.db                      # يوصى به مع الديسك
-OWNER_USERNAME=Ferp0ks                        # اختياري
-PAYLINK_UPGRADE_URL=https://pay.link/...      # اختياري
-PORT=10000                                    # Render يمرره تلقائيًا
-HTML_PROVIDER=docraptor                        # ثابت هنا لكن موجود لو حبيت تبدّل لاحقًا
+ENV VARS (set on Render):
+-------------------------
+BOT_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DB_PATH=/var/data/bot.db
+OWNER_USERNAME=Ferp0ks                 # اختياري لخصائص المالك
+PAYLINK_UPGRADE_URL=https://pay.link/.. # اختياري زر الترقية
+ENABLE_PDF=0                            # 1 لتفعيل محاولة تحويل PDF عبر LibreOffice
+PORT=10000                              # Render sets PORT automatically; we read it
 
-مجلدات/ملفات بالريبو:
----------------------
-assets/html/Navy_ar.html, Navy_en.html        # قوالب HTML
-assets/previews/Navy_ar.jpg, Navy_en.jpg ...  # صور معاينة (اختياري)
-assets/templates/...                          # لو أردت DOCX مخصّص (اختياري)
-requirements.txt
+Files you should create in repo:
+--------------------------------
+requirements.txt  ->  (see bottom of this file)
+apt.txt           ->  (optional, if you want PDF export: libreoffice, fonts)
+render-build.sh   ->  (optional convenience, see bottom)
+assets/templates/ATS_ar.docx   (اختياري)
+assets/templates/ATS_en.docx   (اختياري)
+assets/templates/Modern_ar.docx (اختياري)
+assets/templates/Modern_en.docx (اختياري)
 
-أوامر محلية:
+If a template .docx is missing, bot will auto‑generate a simple DOCX using python-docx.
+
+Run locally:
 ------------
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python bot.py
 
-Start Command (Render):   python bot.py
+Render start command:
+---------------------
+chmod +x render-build.sh   # once, in repo
+# In Render service:
+Build Command:   ./render-build.sh
+Start Command:   python bot.py
+
 """
 import asyncio
 import json
@@ -63,22 +73,18 @@ log = logging.getLogger("cvbot")
 # ============ Config ============
 DB_PATH = os.getenv("DB_PATH", "/var/data/bot.db")
 OWNER_USERNAME = os.getenv("OWNER_USERNAME", "")
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or "0")
 PAYLINK_UPGRADE_URL = os.getenv("PAYLINK_UPGRADE_URL", "")
+ENABLE_PDF = os.getenv("ENABLE_PDF", "0") == "1"
 PORT = int(os.getenv("PORT", os.getenv("RENDER_PORT", "10000")))
 TEMPLATES_DIR = Path("assets/templates")
-HTML_TEMPLATES_DIR = Path("assets/html")
-
 EXPORTS_DIR = Path(os.getenv("EXPORTS_DIR", "/var/data/exports"))
 try:
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 except Exception:
-    # Fallback محلي لو ما فيه ديسك أثناء التشغيل
+    # Fallback to local writable dir if /var/data is not available during runtime
     EXPORTS_DIR = Path("./exports")
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-# HTML→PDF Provider (DocRaptor)
-HTML_PROVIDER = os.getenv("HTML_PROVIDER", "docraptor").lower()
-DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY", "")
 
 # ============ Conversation States ============
 (
@@ -106,8 +112,8 @@ DOCRAPTOR_API_KEY = os.getenv("DOCRAPTOR_API_KEY", "")
 ) = range(21)
 
 TEMPLATES_INDEX = {
-    "ar": [("Navy", "احترافي (شريط جانبي أزرق)"), ("Elegant", "أنيق رمادي"), ("Modern", "حديث"), ("Minimal", "بسيط"), ("ATS", "مطابق ATS")],
-    "en": [("Navy", "Professional Navy Sidebar"), ("Elegant", "Elegant Gray"), ("Modern", "Modern"), ("Minimal", "Minimal"), ("ATS", "ATS")],
+    "ar": [("ATS", "ATS (مطابق أنظمة التتبع)"), ("Modern", "حديث"), ("Minimal", "بسيط"), ("Navy", "احترافي (شريط جانبي أزرق)"), ("Elegant", "أنيق رمادي")],
+    "en": [("ATS", "ATS"), ("Modern", "Modern"), ("Minimal", "Minimal"), ("Navy", "Professional Navy Sidebar"), ("Elegant", "Elegant Gray")],
 }
 
 # ============ DB Helpers ============
@@ -117,6 +123,7 @@ class DB:
         try:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         except Exception:
+            # Fallback if /var/data is not writable at runtime
             self.path = str(Path("./var_data/bot.db"))
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._init()
@@ -143,7 +150,7 @@ class DB:
               full_name TEXT,
               phone TEXT, email TEXT, city TEXT, links TEXT,
               summary TEXT,
-              template TEXT DEFAULT 'Navy',
+              template TEXT DEFAULT 'ATS',
               lang TEXT DEFAULT 'ar',
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
               updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -178,6 +185,8 @@ class DB:
             """
         )
         con.commit()
+        cur.execute("CREATE TABLE IF NOT EXISTS cv_once(user_id INTEGER PRIMARY KEY, used INTEGER DEFAULT 0)")
+        con.commit()
         con.close()
 
     # Users & VIP
@@ -200,7 +209,7 @@ class DB:
         cur.execute("UPDATE users SET vip=? WHERE user_id=?", (vip, user_id))
         con.commit(); con.close()
 
-    # Quota (تحديد تصدير مجاني يومي لغير VIP)
+    # Quota
     def can_export_today(self, user_id: int, free_limit: int = 1) -> bool:
         today = date.today().isoformat()
         con = self._conn(); cur = con.cursor()
@@ -229,6 +238,21 @@ class DB:
                 cur.execute("UPDATE cv_quota SET daily_used=1, last_reset=? WHERE user_id=?", (today, user_id))
             else:
                 cur.execute("UPDATE cv_quota SET daily_used=daily_used+1 WHERE user_id=?", (user_id,))
+        con.commit(); con.close()
+
+    # Free-once quota (lifetime, for non-VIP users)
+    def free_once_available(self, user_id: int) -> bool:
+        con = self._conn(); cur = con.cursor()
+        cur.execute("SELECT used FROM cv_once WHERE user_id=?", (user_id,))
+        row = cur.fetchone(); con.close()
+        return (row is None) or (row[0] == 0)
+
+    def mark_free_once_used(self, user_id: int):
+        con = self._conn(); cur = con.cursor()
+        cur.execute(
+            "INSERT INTO cv_once(user_id, used) VALUES(?,1) ON CONFLICT(user_id) DO UPDATE SET used=1",
+            (user_id,)
+        )
         con.commit(); con.close()
 
     # Profiles
@@ -305,12 +329,31 @@ class DB:
         con.close()
         return profile, exps, edus, skills
 
-# ============ DOCX Rendering (احتياطي/اختياري) ============
+# Helper: detect owner (always VIP)
+def user_is_owner(u) -> bool:
+    try:
+        if OWNER_ID and getattr(u, "id", None) == OWNER_ID:
+            return True
+    except Exception:
+        pass
+    if OWNER_USERNAME:
+        uname = (getattr(u, "username", "") or "").lower()
+        if uname == OWNER_USERNAME.lower():
+            return True
+    return False
+
+# ============ Rendering ============
 from docxtpl import DocxTemplate  # type: ignore
-from docx import Document  # fallback generator
+
+try:
+    from docx import Document  # python-docx fallback
+except Exception:  # pragma: no cover
+    Document = None
+
 
 def _safe(s: str | None) -> str:
     return s or ""
+
 
 def render_docx_for_profile(pid: int, db: DB) -> Path:
     data = db.fetch_full_profile(pid)
@@ -318,7 +361,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         raise RuntimeError("Profile not found")
     profile, exps, edus, skills = data
     lang = profile.get("lang", "ar")
-    tpl_slug = profile.get("template", "Navy")
+    tpl_slug = profile.get("template", "ATS")
 
     ctx = {
         "full_name": _safe(profile.get("full_name")),
@@ -332,6 +375,7 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         "education": edus,
         "skills": skills,
     }
+    # derived fields for nicer templates
     skills_list = [s.strip() for s in (skills or "").replace("؛", ",").split(",") if s.strip()]
     ctx["skills_list"] = skills_list
 
@@ -344,7 +388,9 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         doc.save(out_path)
         return out_path
 
-    # Fallback: DOCX بسيط (عشان ما نوقف العميل حتى لو مافي قوالب docx)
+    # Fallback: generate professional DOCX with a navy sidebar if template not found
+    if Document is None:
+        raise RuntimeError("No template found and python-docx not installed")
     from docx.shared import Inches, Pt, RGBColor
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
@@ -358,132 +404,135 @@ def render_docx_for_profile(pid: int, db: DB) -> Path:
         tcPr.append(shd)
 
     docx = Document()
-    for s in docx.sections:
-        s.top_margin = s.bottom_margin = Inches(0.4)
-        s.left_margin = s.right_margin = Inches(0.4)
 
+    # Outer margins smaller for compact CV
+    sections = docx.sections
+    for s in sections:
+        s.top_margin, s.bottom_margin = Inches(0.4), Inches(0.4)
+        s.left_margin, s.right_margin = Inches(0.4), Inches(0.4)
+
+    # Two-column layout via table
     table = docx.add_table(rows=1, cols=2)
     table.autofit = False
     left, right = table.rows[0].cells
+    # widths (approx A4): 2.2in sidebar, 4.8in content
     table.columns[0].width = Inches(2.2)
     table.columns[1].width = Inches(4.8)
 
-    NAVY = RGBColor(31, 58, 95)
+    NAVY = RGBColor(31, 58, 95)  # #1f3a5f
     WHITE = RGBColor(255, 255, 255)
+
+    # Left Sidebar Styling
     shade_cell(left, '1f3a5f')
 
     def add_left_heading(text):
         p = left.add_paragraph()
-        r = p.add_run(text if lang == 'ar' else text.upper())
-        r.font.bold = True; r.font.size = Pt(10); r.font.color.rgb = WHITE
+        r = p.add_run(text.upper())
+        r.font.bold = True
+        r.font.size = Pt(10)
+        r.font.color.rgb = WHITE
+        p.space_after = Pt(2)
 
     def add_left_line(text):
         p = left.add_paragraph()
-        r = p.add_run(text); r.font.size = Pt(9); r.font.color.rgb = WHITE
+        r = p.add_run(text)
+        r.font.size = Pt(9)
+        r.font.color.rgb = WHITE
+        p.space_after = Pt(1)
 
-    add_left_heading('الاتصال' if lang=='ar' else 'CONTACT')
-    for item in [ctx['phone'], ctx['email'], ctx['city'], ctx['links']]:
-        if item: add_left_line(item)
+    # Contact
+    add_left_heading('Contact' if lang=='en' else 'الاتصال')
+    for item in [ctx['phone'], ctx['email'], ctx['city']]:
+        if item:
+            add_left_line(item)
+    if ctx['links']:
+        add_left_line(ctx['links'])
 
+    # Divider
     left.add_paragraph().space_after = Pt(6)
 
-    add_left_heading('التعليم' if lang=='ar' else 'EDUCATION')
+    # Education
+    add_left_heading('Education' if lang=='en' else 'التعليم')
     for ed in edus:
-        add_left_line(f"{ed.get('degree','')} — {ed.get('school','')}" + (f" ({ed.get('year')})" if ed.get('year') else ""))
+        add_left_line(f"{ed.get('degree','')} — {ed.get('school','')}")
+        if ed.get('year'):
+            add_left_line(str(ed.get('year')))
     left.add_paragraph().space_after = Pt(6)
 
-    add_left_heading('المهارات' if lang=='ar' else 'SKILLS')
+    # Skills
+    add_left_heading('Skills' if lang=='en' else 'المهارات')
     if skills_list:
         for s_item in skills_list:
             add_left_line(f"• {s_item}")
+    elif ctx['skills']:
+        add_left_line(ctx['skills'])
 
+    # Right side: Name/Title
     p = right.add_paragraph()
-    rname = p.add_run(ctx['full_name'])
-    rname.font.size = Pt(20); rname.font.bold = True; rname.font.color.rgb = NAVY
+    name_run = p.add_run(ctx['full_name'])
+    name_run.font.size = Pt(20)
+    name_run.font.bold = True
+    name_run.font.color.rgb = NAVY
     if ctx['title']:
-        p.add_run("\n")
-        rtitle = p.add_run(ctx['title'])
-        rtitle.font.size = Pt(12)
-    right.add_paragraph()
+        p.add_run('
+')
+        t = p.add_run(ctx['title'])
+        t.font.size = Pt(12)
+    right.add_paragraph()  # spacing
 
-    hdr = right.add_paragraph('الملخص' if lang=='ar' else 'Summary')
-    hdr.runs[0].font.size = Pt(12); hdr.runs[0].font.bold = True
+    # Summary
+    hdr = right.add_paragraph('Summary' if lang=='en' else 'الملخص')
+    hdr.runs[0].font.size = Pt(12)
+    hdr.runs[0].font.bold = True
     if ctx['summary']:
         for line in textwrap.wrap(ctx['summary'], width=120):
-            rp = right.add_paragraph(line); rp.paragraph_format.space_after = Pt(2)
+            rp = right.add_paragraph(line)
+            rp.paragraph_format.space_after = Pt(2)
     right.add_paragraph()
 
-    hdr = right.add_paragraph('الخبرات' if lang=='ar' else 'Work Experience')
-    hdr.runs[0].font.size = Pt(12); hdr.runs[0].font.bold = True
+    # Experience
+    hdr = right.add_paragraph('Work Experience' if lang=='en' else 'الخبرات')
+    hdr.runs[0].font.size = Pt(12)
+    hdr.runs[0].font.bold = True
     for e in exps:
         line = right.add_paragraph()
         r1 = line.add_run(f"{e.get('role','')} — {e.get('company','')}")
-        r1.font.bold = True; r1.font.size = Pt(11)
+        r1.font.bold = True
+        r1.font.size = Pt(11)
         if e.get('start_date') or e.get('end_date'):
             line.add_run(f" ({e.get('start_date','')} - {e.get('end_date','')})")
+        # bullets
         for b in e.get('bullets', [])[:6]:
             bp = right.add_paragraph(f"• {b}")
             bp.paragraph_format.space_after = Pt(0)
+    docx.add_paragraph()
 
     docx.save(out_path)
     return out_path
 
-# ============ HTML → PDF (DocRaptor) ============
-from jinja2 import Template
-import httpx
 
-def render_html_for_profile(pid: int, db: DB) -> str:
-    data = db.fetch_full_profile(pid)
-    if not data:
-        raise RuntimeError("Profile not found")
-    profile, exps, edus, skills = data
-    lang = profile.get("lang", "ar")
-    tpl_slug = profile.get("template", "Navy")
-
-    skills_list = [s.strip() for s in (skills or "").replace("؛", ",").split(",") if s.strip()]
-    ctx = {
-        "full_name": _safe(profile.get("full_name")),
-        "title": _safe(profile.get("title")),
-        "phone": _safe(profile.get("phone")),
-        "email": _safe(profile.get("email")),
-        "city": _safe(profile.get("city")),
-        "links": _safe(profile.get("links")),
-        "summary": _safe(profile.get("summary")),
-        "experiences": exps,
-        "education": edus,
-        "skills_list": skills_list,
-        "photo_data_uri": "",  # يمكن تفعيله لاحقًا
-    }
-
-    path = HTML_TEMPLATES_DIR / f"{tpl_slug}_{lang}.html"
-    if not path.exists():
-        # Fallback HTML بسيط
-        return f"<html><meta charset='utf-8'><body><h1>{ctx['full_name']}</h1><p>{ctx['title']}</p><p>{ctx['summary']}</p></body></html>"
-    html = path.read_text(encoding="utf-8")
-    return Template(html).render(**ctx)
-
-async def html_to_pdf_docraptor(html: str, test_mode: bool = False) -> bytes:
-    """
-    DocRaptor synchronous API: POST /docs (Basic Auth)
-    test_mode=True يضيف watermark لكنه مجاني للتجارب.
-    """
-    if not DOCRAPTOR_API_KEY:
-        raise RuntimeError("DOCRAPTOR_API_KEY is missing")
-    payload = {
-        "doc": {
-            "test": bool(test_mode),
-            "document_type": "pdf",
-            "name": "cv.pdf",
-            "document_content": html
-        }
-    }
-    async with httpx.AsyncClient(timeout=90) as client:
-        r = await client.post("https://api.docraptor.com/docs", auth=(DOCRAPTOR_API_KEY, ""), json=payload)
-        r.raise_for_status()
-        return r.content
+def try_convert_to_pdf(docx_path: Path) -> Path | None:
+    """Try to convert DOCX->PDF using LibreOffice if available and ENABLE_PDF=1."""
+    if not ENABLE_PDF:
+        return None
+    lo = shutil.which("libreoffice") or shutil.which("soffice")
+    if not lo:
+        log.warning("LibreOffice not found; skipping PDF convert")
+        return None
+    out_dir = docx_path.parent
+    cmd = [lo, "--headless", "--convert-to", "pdf", "--outdir", str(out_dir), str(docx_path)]
+    try:
+        import subprocess
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        pdf_path = docx_path.with_suffix(".pdf")
+        return pdf_path if pdf_path.exists() else None
+    except Exception as e:  # pragma: no cover
+        log.exception("PDF convert failed: %s", e)
+        return None
 
 # ============ Bot Handlers ============
 db = DB(DB_PATH)
+
 
 async def set_my_commands(app: Application):
     cmds = [
@@ -494,23 +543,33 @@ async def set_my_commands(app: Application):
     ]
     await app.bot.set_my_commands(cmds)
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     db.ensure_user(u.id)
+    if user_is_owner(u):
+        db.set_vip(u.id, 1)
     await update.effective_message.reply_text(
-        "أهلًا! هذا بوت إنشاء سيرة ذاتية احترافية (HTML→PDF DocRaptor).\n"
-        "- أنشئ سيرة عربية/إنجليزية\n- اختر قالب احترافي\n- أضف خبرات/تعليم/مهارات\n"
-        "- DOCX (مجاني) + PDF عالي الجودة (VIP)\n\nأرسل /cv للبدء."
+        """أهلًا! هذا بوت إنشاء سيرة ذاتية (CV) احترافي.
+- أنشئ سيرة عربية أو إنجليزية
+- اختر قالب (ATS/Modern/Minimal)
+- أضف خبرات/تعليم/مهارات
+- صدّر DOCX (مجاني) و PDF و Cover Letter (VIP)
+
+أرسل /cv للبدء."""
     )
 
+
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.effective_message.reply_text("/cv للبدء • /upgrade للترقية • تواصل: @{}".format(OWNER_USERNAME or "admin"))
+    await update.effective_message.reply_text("/cv للبدء • /upgrade للترقية • تواصل مع المالك: @{}".format(OWNER_USERNAME or "admin"))
+
 
 async def upgrade_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if PAYLINK_UPGRADE_URL:
         await update.effective_message.reply_text(f"للترقية إلى VIP: {PAYLINK_UPGRADE_URL}")
     else:
-        await update.effective_message.reply_text("فعّل PAYLINK_UPGRADE_URL في المتغيرات البيئية.")
+        await update.effective_message.reply_text("فعّل PAYLINK_UPGRADE_URL في المتغيرات البيئية لزر ترقية فعّال.")
+
 
 # --- CV Flow ---
 async def cv_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -521,6 +580,7 @@ async def cv_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("اختر لغة السيرة:", reply_markup=InlineKeyboardMarkup(kb))
     return ASK_LANG
 
+
 async def cv_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     lang = q.data.split(":")[-1]
@@ -530,6 +590,7 @@ async def cv_set_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text("اختر القالب:", reply_markup=InlineKeyboardMarkup(tpl_buttons))
     return ASK_TPL
 
+
 async def cv_set_tpl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     tpl_slug = q.data.split(":")[-1]
@@ -537,42 +598,50 @@ async def cv_set_tpl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.edit_message_text(f"تم اختيار قالب: {tpl_slug}\nأرسل اسمك الكامل:")
     return ASK_NAME
 
+
 async def cv_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["full_name"] = update.message.text.strip()
-    await update.message.reply_text("المسمى الوظيفي المستهدف:")
+    await update.message.reply_text("اكتب المسمى الوظيفي المستهدف (مثال: محلّل بيانات / Data Analyst):")
     return ASK_TITLE
+
 
 async def cv_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["title"] = update.message.text.strip()
     await update.message.reply_text("رقم الجوال:")
     return ASK_PHONE
 
+
 async def cv_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["phone"] = update.message.text.strip()
     await update.message.reply_text("البريد الإلكتروني:")
     return ASK_EMAIL
+
 
 async def cv_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["email"] = update.message.text.strip()
     await update.message.reply_text("المدينة:")
     return ASK_CITY
 
+
 async def cv_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["city"] = update.message.text.strip()
-    await update.message.reply_text("روابطك (LinkedIn/GitHub) إن وجدت، مفصولة بفواصل:")
+    await update.message.reply_text("روابطك (LinkedIn/GitHub) إن وجدت، مفصولة بفواصل، أو اكتب - لا يوجد -:")
     return ASK_LINKS
+
 
 async def cv_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["links"] = update.message.text.strip()
-    await update.message.reply_text("اكتب ملخّصًا قصيرًا (3-4 أسطر):")
+    await update.message.reply_text("اكتب ملخّصًا قصيرًا (3-4 أسطر) عن خبرتك ومهاراتك:")
     return ASK_SUMMARY
+
 
 async def cv_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["summary"] = update.message.text.strip()
+    # Create profile in DB
     u = update.effective_user
     cv = context.user_data["cv"]
     db.ensure_user(u.id, cv.get("lang", "ar"))
-    pid = db.new_profile(u.id, cv.get("lang", "ar"), cv.get("template", "Navy"))
+    pid = db.new_profile(u.id, cv.get("lang", "ar"), cv.get("template", "ATS"))
     db.update_profile(
         pid,
         full_name=cv.get("full_name"), title=cv.get("title"), phone=cv.get("phone"),
@@ -581,6 +650,7 @@ async def cv_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["cv"]["pid"] = pid
     await show_menu(update, context, pid)
     return MENU
+
 
 async def show_menu(update_or_q, context: ContextTypes.DEFAULT_TYPE, pid: int):
     txt = (
@@ -602,6 +672,7 @@ async def show_menu(update_or_q, context: ContextTypes.DEFAULT_TYPE, pid: int):
         q = update_or_q
         await q.edit_message_text(txt, reply_markup=InlineKeyboardMarkup(kb))
 
+
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     parts = q.data.split(":")
@@ -622,26 +693,31 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("خيارات التصدير:")
         return await show_export_menu(q, context, pid)
 
+
 # --- Experience flow ---
 async def exp_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["exp"]["role"] = update.message.text.strip()
     await update.message.reply_text("اسم الشركة:")
     return EXP_COMPANY
 
+
 async def exp_company(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["exp"]["company"] = update.message.text.strip()
     await update.message.reply_text("تاريخ البدء (مثال: 01/2023):")
     return EXP_START
+
 
 async def exp_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["exp"]["start_date"] = update.message.text.strip()
     await update.message.reply_text("تاريخ الانتهاء (أو اكتب Present):")
     return EXP_END
 
+
 async def exp_end(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["exp"]["end_date"] = update.message.text.strip()
-    await update.message.reply_text("أرسل نقاط الإنجاز، كل سطر نقطة (أرسلها برسالة واحدة):")
+    await update.message.reply_text("أرسل نقاط الإنجاز في هذه الخبرة، كل سطر نقطة (أرسل جميع النقاط برسالة واحدة):")
     return EXP_BULLETS
+
 
 async def exp_bullets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [l.strip("• ").strip() for l in update.message.text.splitlines() if l.strip()]
@@ -651,21 +727,25 @@ async def exp_bullets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context, e["pid"]) 
     return MENU
 
+
 # --- Education flow ---
 async def edu_degree(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edu"]["degree"] = update.message.text.strip()
-    await update.message.reply_text("التخصص:")
+    await update.message.reply_text("التخصص (مثال: علوم الحاسب):")
     return EDU_MAJOR
+
 
 async def edu_major(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edu"]["major"] = update.message.text.strip()
     await update.message.reply_text("اسم الجامعة/المعهد:")
     return EDU_SCHOOL
 
+
 async def edu_school(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edu"]["school"] = update.message.text.strip()
-    await update.message.reply_text("سنة التخرج:")
+    await update.message.reply_text("سنة التخرج (مثال: 2024):")
     return EDU_YEAR
+
 
 async def edu_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["edu"]["year"] = update.message.text.strip()
@@ -674,6 +754,7 @@ async def edu_year(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("تمت إضافة التعليم.")
     await show_menu(update, context, ed["pid"]) 
     return MENU
+
 
 # --- Skills ---
 async def skills_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -684,17 +765,19 @@ async def skills_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_menu(update, context, pid)
     return MENU
 
+
 # --- Export ---
 async def show_export_menu(q, context: ContextTypes.DEFAULT_TYPE, pid: int):
     user_id = q.from_user.id
     buttons = [[InlineKeyboardButton("📄 تصدير DOCX", callback_data=f"cv:export:docx:{pid}")]]
-    if db.is_vip(user_id):
-        buttons.append([InlineKeyboardButton("🧾 تصدير PDF (جودة عالية)", callback_data=f"cv:export:pdf:{pid}")])
+    if db.is_vip(user_id) or user_is_owner(q.from_user):
+        buttons.append([InlineKeyboardButton("🧾 تصدير PDF", callback_data=f"cv:export:pdf:{pid}")])
         buttons.append([InlineKeyboardButton("✉️ Cover Letter", callback_data=f"cv:export:cover:{pid}")])
     else:
         buttons.append([InlineKeyboardButton("⭐ ترقية إلى VIP", url=PAYLINK_UPGRADE_URL or "https://example.com")])
     await q.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
     return CONFIRM_EXPORT
+
 
 async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -703,55 +786,52 @@ async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = q.from_user.id
 
     if kind == "docx":
-        if not db.is_vip(user_id) and not db.can_export_today(user_id, free_limit=1):
-            await q.edit_message_text("وصلت حد التصدير اليومي المجاني. قم بالترقية إلى VIP للمزيد.")
+        is_owner = user_is_owner(q.from_user)
+        if not (db.is_vip(user_id) or is_owner) and (not db.free_once_available(user_id)):
+            await q.edit_message_text("استخدمت محاولتك المجانية الوحيدة. رجاءً قم بالترقية إلى VIP للمزيد من التصدير.")
             return ConversationHandler.END
         await q.edit_message_text("جارٍ إنشاء DOCX…")
         docx_path = render_docx_for_profile(pid, db)
-        db.bump_export(user_id)
+        if not (db.is_vip(user_id) or is_owner):
+            db.mark_free_once_used(user_id)
         with open(docx_path, "rb") as f:
             await q.message.reply_document(InputFile(f, filename=docx_path.name), caption="تم إنشاء السيرة ✨")
         await show_menu(q, context, pid)
         return MENU
 
     if kind == "pdf":
-        if not db.is_vip(user_id):
+        if not (db.is_vip(user_id) or user_is_owner(q.from_user)):
             await q.edit_message_text("ميزة PDF لعملاء VIP فقط.")
             return ConversationHandler.END
-        await q.edit_message_text("جارٍ توليد PDF الاحترافي…")
-        html = render_html_for_profile(pid, db)
-        try:
-            # test_mode=False لعملاء VIP (بدون ووتـرمارك)
-            pdf_bytes = await html_to_pdf_docraptor(html, test_mode=False)
-        except Exception as e:
-            await q.message.reply_text(f"فشل DocRaptor: {e}\n(سأرسل DOCX بدلًا منه)")
-            docx_path = render_docx_for_profile(pid, db)
+        await q.edit_message_text("جارٍ إنشاء PDF…")
+        docx_path = render_docx_for_profile(pid, db)
+        pdf_path = try_convert_to_pdf(docx_path)
+        if not pdf_path:
+            await q.message.reply_text("تعذر تحويل PDF على الخادم. تم إرسال DOCX بدلًا منه.")
             with open(docx_path, "rb") as f:
                 await q.message.reply_document(InputFile(f, filename=docx_path.name))
-            return MENU
-
-        out = EXPORTS_DIR / f"cv_{pid}.pdf"
-        out.write_bytes(pdf_bytes)
-        with open(out, "rb") as f:
-            await q.message.reply_document(InputFile(f, filename=out.name), caption="PDF جاهز ✅")
+        else:
+            with open(pdf_path, "rb") as f:
+                await q.message.reply_document(InputFile(f, filename=pdf_path.name), caption="PDF جاهز ✅")
         await show_menu(q, context, pid)
         return MENU
 
     if kind == "cover":
-        if not db.is_vip(user_id):
+        if not (db.is_vip(user_id) or user_is_owner(q.from_user)):
             await q.edit_message_text("Cover Letter لعملاء VIP فقط.")
             return ConversationHandler.END
+        # Minimal cover letter (يمكن استبداله بذكاء اصطناعي لاحقًا)
         profile, exps, edus, skills = db.fetch_full_profile(pid)
         lang = profile.get("lang", "ar")
         body = (
-            f"السادة المحترمون،\n\n"
-            f"أتقدم لوظيفة {profile.get('title','')}.\n"
-            f"لدي خبرات وإنجازات ذات صلة، وأتطلع لفرصة مقابلة.\n\n"
+            f"السادة المحترمون،\n\nأود التقدم لوظيفة {profile.get('title','')}،\n"
+            f"أمتلك خبرات ذات صلة، وأبرُز إنجازاتي في بيئات عمل ديناميكية.\n"
+            f"أرفقت سيرتي الذاتية، وأتطلع لفرصة مقابلة لمناقشة مدى مواءمتي للفريق.\n\n"
             f"تحياتي،\n{profile.get('full_name','')}\n{profile.get('phone','')} • {profile.get('email','')}"
         ) if lang == "ar" else (
-            f"Dear Hiring Team,\n\n"
-            f"I am applying for the {profile.get('title','')} role.\n"
-            f"I bring relevant experience and would welcome the chance to discuss.\n\n"
+            f"Dear Hiring Team,\n\nI am applying for the {profile.get('title','')} role. "
+            f"I bring relevant experience and a track record of delivering impact.\n"
+            f"Please find my resume attached. I would welcome the opportunity to discuss my fit.\n\n"
             f"Kind regards,\n{profile.get('full_name','')}\n{profile.get('phone','')} • {profile.get('email','')}"
         )
         fn = EXPORTS_DIR / f"cover_{pid}.txt"
@@ -761,32 +841,41 @@ async def export_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_menu(q, context, pid)
         return MENU
 
+
 # ============ AIOHTTP mini server (/health) ============
 async def create_app_and_site(app_tg: Application):
     async def root(request):
         return web.Response(text="OK")
 
     async def health(request):
-        # تنبيه: datetime.utcnow() مقبول هنا
         return web.json_response({"ok": True, "service": "cvbot", "time": datetime.utcnow().isoformat()})
 
     app = web.Application()
-    app.add_routes([web.get("/", root), web.get("/health", health), web.head("/", root), web.head("/health", health)])
+    app.add_routes([
+        web.get("/", root),
+        web.get("/health", health),
+        web.head("/", root),
+        web.head("/health", health),
+    ])
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host="0.0.0.0", port=PORT)
     await site.start()
     log.info("aiohttp listening on :%s", PORT)
 
+
 # ============ Main ============
 async def _post_init(app: Application):
+    # Runs inside PTB's own event loop before polling starts
     await set_my_commands(app)
     await create_app_and_site(app)
+
 
 def main():
     token = os.getenv("BOT_TOKEN", "")
     if not token:
         raise RuntimeError("BOT_TOKEN is missing")
+
     application = Application.builder().token(token).post_init(_post_init).build()
 
     application.add_handler(CommandHandler("start", start))
@@ -831,7 +920,11 @@ def main():
     application.add_handler(cv_conv)
 
     log.info("Bot starting…")
+    # IMPORTANT: Don't run inside asyncio.run / don't await here to avoid nested loop error
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
+
+
